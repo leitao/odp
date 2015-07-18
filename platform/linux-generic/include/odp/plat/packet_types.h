@@ -36,6 +36,15 @@ typedef ODP_HANDLE_T(odp_packet_seg_t);
 
 #define ODP_PACKET_SEG_INVALID _odp_cast_scalar(odp_packet_seg_t, 0xffffffff)
 
+typedef enum {
+	PKT_GREEN = 0,
+	PKT_YELLOW = 1,
+	PKT_RED = 2,
+	PKT_ALL_COLORS = 3,
+} odp_pkt_color_t;
+
+#define ODP_NUM_PKT_COLORS 3
+
 /** Get printable format of odp_packet_t */
 static inline uint64_t odp_packet_to_u64(odp_packet_t hdl)
 {
