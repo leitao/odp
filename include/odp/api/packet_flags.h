@@ -327,6 +327,55 @@ void odp_packet_has_sctp_set(odp_packet_t pkt, int val);
 void odp_packet_has_icmp_set(odp_packet_t pkt, int val);
 
 /**
+ * Get packet color
+ * @param pkt Packet handle
+ * @return packet color
+ */
+odp_pkt_color_t odp_packet_color(odp_packet_t pkt);
+
+/**
+ * Set packet color
+ *
+ * @param pkt Packet handle
+ * @param color Color to set
+ */
+void odp_packet_color_set(odp_packet_t pkt, odp_pkt_color_t color);
+
+/**
+ * Get drop eligible status
+ *
+ * @oaram pkt Packet handle
+ * @return Packet drop eligibility status
+ * @retval 0 Packet is not drop eligible
+ * @retval 1 Packet is drop
+ */
+odp_bool_t odp_packet_drop_eligible(odp_packet_t pkt);
+
+/**
+ * Set drop eligible status
+ *
+ * @param pkt Packet handle
+ * @param status Drop eligibility status
+ */
+void odp_packet_drop_eligible_set(odp_packet_t pkt, odp_bool_t status);
+
+/**
+ * Get shaper length adjustment
+ *
+ * @param pkt Packet handle
+ * @return Shaper adjustment (-128..127)
+ */
+int8_t odp_packet_shaper_len_adjust(odp_packet_t pkt);
+
+/**
+ * Set shaper length adjustment
+ *
+ * @param pkt Packet handle
+ * @param adj Signed adjustment value
+ */
+void odp_packet_shaper_len_adjust_set(odp_packet_t pkt, int8_t adj);
+
+/**
  * @}
  */
 
