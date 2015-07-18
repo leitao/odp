@@ -26,7 +26,7 @@ extern "C" {
  */
 
 /**> @todo Fill this in with what it's supposed to be */
-#define ODP_CYCLES_PER_SEC 100
+#define ODP_CYCLES_PER_SEC 1000000000
 
 /** The ODP_TM_MAX_NUM_SYSTEMS constant specifies the maximum number of TM
  * systems that may be created.  On some platforms this might be much more
