@@ -217,3 +217,47 @@ void odp_packet_has_flow_hash_clr(odp_packet_t pkt)
 	pkt_hdr->has_hash = 0;
 }
 
+odp_pkt_color_t odp_packet_color(odp_packet_t pkt)
+{
+	retflag(pkt, input_flags.color);
+}
+
+void odp_packet_color_set(odp_packet_t pkt, odp_pkt_color_t color)
+{
+	odp_packet_hdr_t *pkt_hdr = odp_packet_hdr(pkt);
+
+	if (pkt_hdr->input_flags.unparsed)
+		_odp_packet_parse(pkt_hdr);
+
+	pkt_hdr->input_flags.color = color;
+}
+
+odp_bool_t odp_packet_drop_eligible(odp_packet_t pkt)
+{
+	odp_packet_hdr_t *pkt_hdr = odp_packet_hdr(pkt);
+
+	if (pkt_hdr->input_flags.unparsed)
+		_odp_packet_parse(pkt_hdr);
+
+	return !pkt_hdr->input_flags.nodrop;
+}
+
+void odp_packet_drop_eligible_set(odp_packet_t pkt, odp_bool_t drop)
+{
+	setflag(pkt, input_flags.nodrop, !drop);
+}
+
+int8_t odp_packet_shaper_len_adjust(odp_packet_t pkt)
+{
+	retflag(pkt, output_flags.shaper_len_adj);
+}
+
+void odp_packet_shaper_len_adjust_set(odp_packet_t pkt, int8_t adj)
+{
+	odp_packet_hdr_t *pkt_hdr = odp_packet_hdr(pkt);
+
+	if (pkt_hdr->input_flags.unparsed)
+		_odp_packet_parse(pkt_hdr);
+
+	pkt_hdr->output_flags.shaper_len_adj = adj;
+}
