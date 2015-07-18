@@ -136,6 +136,7 @@ noinst_HEADERS = \
 	          ${srcdir}/include/odp_name_table_internal.h \
 		  ${srcdir}/include/odp_pkt_queue_internal.h \
 		  ${srcdir}/include/odp_sorted_list_internal.h \
+		  ${srcdir}/include/odp_timer_wheel_internal.h \
 		  ${srcdir}/Makefile.inc
 
 __LIB__libodp_la_SOURCES = \
@@ -150,6 +151,7 @@ __LIB__libodp_la_SOURCES = \
 			   odp_name_table.c \
 			   odp_pkt_queue.c \
 			   odp_sorted_list.c \
+			   odp_timer_wheel.c \
 			   odp_impl.c \
 			   odp_packet.c \
 			   odp_packet_flags.c \
