@@ -108,6 +108,7 @@ odpapiinclude_HEADERS = \
 		  $(top_srcdir)/include/odp/api/ticketlock.h \
 		  $(top_srcdir)/include/odp/api/time.h \
 		  $(top_srcdir)/include/odp/api/timer.h \
+		  $(top_srcdir)/include/odp/api/traffic_mngr.h \
 		  $(top_srcdir)/include/odp/api/version.h
 
 noinst_HEADERS = \
