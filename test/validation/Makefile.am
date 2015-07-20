@@ -14,6 +14,7 @@ ODP_MODULES = buffer \
 	      thread \
 	      time \
 	      timer \
+	      traffic_mngr \
 	      shmem \
 	      system
 
