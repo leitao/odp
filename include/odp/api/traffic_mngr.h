@@ -497,11 +497,13 @@ typedef struct {
 	odp_bool_t fair_queuing_supported;
 } odp_tm_capability_t;
 
+typedef void (*odp_tm_egress_fcn_t) (odp_packet_t odp_pkt);
+
 /** The tm_egress_kind_e enumeration type is used to indicate the kind of
  * egress object ("spigot") associated with this TM system.
  */
 typedef enum {
-	TM_EGRESS_PKT_IO, TM_EGRESS_ODP_QUEUE, TM_EGRESS_TM_QUEUE
+        TM_EGRESS_PKT_IO, TM_EGRESS_ODP_QUEUE, TM_EGRESS_TM_QUEUE, TM_EGRESS_FN
 } tm_egress_kind_e;
 
 /** The odp_tm_egress_t type is used to describe that type of "egress spigot"
@@ -515,6 +517,7 @@ typedef struct {
 		odp_pktio_t pktio;
 		odp_queue_t odp_queue;
 		odp_tm_queue_t tm_queue;
+	        odp_tm_egress_fcn_t egress_fcn;
 	};
 } odp_tm_egress_t;
 
@@ -567,7 +570,7 @@ void odp_tm_params_init(odp_tm_params_t *params);
  * @return            Returns ODP_TM_INVALID upon failure, otherwise the newly
  *                    created TM system's odp_tm_t handle is returned.
  */
-odp_tm_t odp_tm_create(char *name, odp_tm_params_t *params);
+odp_tm_t odp_tm_create(const char *name, odp_tm_params_t *params);
 
 /** Find a pre-existing TM Packet Scheduling system.  This function can be
  * used either to find a TM system created previously with odp_tm_create OR
@@ -593,7 +596,7 @@ odp_tm_t odp_tm_create(char *name, odp_tm_params_t *params);
  *                        odp_tm_t value is returned, otherwise
  *                        ODP_TM_INVALID is returned.
  */
-odp_tm_t odp_tm_find(char *name, odp_tm_capability_t *capability);
+odp_tm_t odp_tm_find(const char *name, odp_tm_capability_t *capability);
 
 /** odp_tm_capability() can be used to query the actual limits of a given TM
  * system.  This function can be used for both built-in TM systems AND TM
@@ -717,7 +720,7 @@ void odp_tm_shaper_params_init(odp_tm_shaper_params_t *params);
  *                    allocated odp_tm_shaper_t value representing this
  *                    profile object.
  */
-odp_tm_shaper_t odp_tm_shaper_create(char *name,
+odp_tm_shaper_t odp_tm_shaper_create(const char *name,
 				     odp_tm_shaper_params_t *params);
 
 /** odp_tm_shaper() "gets" the current set of values associated with the
@@ -756,7 +759,7 @@ int odp_tm_shaper_set(odp_tm_shaper_t shaper_profile,
  * @return          Returns ODP_TM_INVALID upon failure, or the shaper
  *                  profile handle created with this name.
  */
-odp_tm_shaper_t odp_tm_shaper_lookup(char *name);
+odp_tm_shaper_t odp_tm_shaper_lookup(const char *name);
 
 /** Scheduler Profiles - types and functions */
 
@@ -816,7 +819,7 @@ void odp_tm_sched_params_init(odp_tm_sched_params_t *params);
  *                    allocated odp_tm_sched_t value representing this profile
  *                    object.
  */
-odp_tm_sched_t odp_tm_sched_create(char *name,
+odp_tm_sched_t odp_tm_sched_create(const char *name,
 				   odp_tm_sched_params_t *params);
 
 /** odp_tm_sched() "gets" the current set of values associated with the
@@ -855,7 +858,7 @@ int odp_tm_sched_set(odp_tm_sched_t sched_profile,
  * @return          Returns ODP_TM_INVALID upon failure, or the scheduler
  *                  profile handle created with this name.
  */
-odp_tm_sched_t odp_tm_sched_lookup(char *name);
+odp_tm_sched_t odp_tm_sched_lookup(const char *name);
 
 /** Queue Threshold Profiles - types and functions */
 
@@ -893,7 +896,7 @@ void odp_tm_threshold_params_init(odp_tm_threshold_params_t *params);
  *                    allocated odp_tm_threshold_t value representing this
  *                    profile object.
  */
-odp_tm_threshold_t odp_tm_threshold_create(char *name,
+odp_tm_threshold_t odp_tm_threshold_create(const char *name,
 					   odp_tm_threshold_params_t *params);
 
 /** odp_tm_shaper() "gets" the current set of values associated with the
@@ -934,7 +937,7 @@ int odp_tm_thresholds_set(odp_tm_threshold_t threshold_profile,
  * @return          Returns ODP_TM_INVALID upon failure, or the queue
  *                  thresholds profile handle created with this name.
  */
-odp_tm_threshold_t odp_tm_thresholds_lookup(char *name);
+odp_tm_threshold_t odp_tm_thresholds_lookup(const char *name);
 
 /** WRED Profiles - types and functions */
 
@@ -1023,7 +1026,7 @@ void odp_tm_wred_params_init(odp_tm_wred_params_t *params);
  *                    allocated odp_tm_wred_t value representing this profile
  *                    object.
  */
-odp_tm_wred_t odp_tm_wred_create(char *name,
+odp_tm_wred_t odp_tm_wred_create(const char *name,
 				 odp_tm_wred_params_t *params);
 
 /** odp_tm_wred() "gets" the current set of values associated with the
@@ -1060,7 +1063,7 @@ int odp_tm_wred_set(odp_tm_wred_t wred_profile, odp_tm_wred_params_t *params);
  * @return          Returns ODP_TM_INVALID upon failure, or the WRED
  *                  profile handle created with this name.
  */
-odp_tm_wred_t odp_tm_wred_lookup(char *name);
+odp_tm_wred_t odp_tm_wred_lookup(const char *name);
 
 /** The odp_tm_node_params_t record type is used to hold extra parameters when
  * calling the odp_tm_node_create() function.  Many of these fields are
@@ -1130,7 +1133,7 @@ void odp_tm_node_params_init(odp_tm_node_params_t *params);
  * @return            Returns ODP_TM_INVALID upon failure, otherwise returns
  *                    a valid odp_tm_node_t handleif successful.
  */
-odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, char *name,
+odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, const char *name,
 				 odp_tm_node_params_t *params);
 
 /** The odp_tm_node_shaper_config() function is used to dynamically set or
@@ -1204,7 +1207,7 @@ int odp_tm_node_wred_config(odp_tm_node_t tm_node,
  * @return            Returns ODP_TM_INVALID upon failure, or the tm_node
  *                    handle created with this name.
  */
-odp_tm_node_t odp_tm_node_lookup(odp_tm_t odp_tm, char *name);
+odp_tm_node_t odp_tm_node_lookup(odp_tm_t odp_tm, const char *name);
 
 /** The odp_tm_queue_params_t record type is used to hold extra parameters
  * when calling the odp_tm_queue_create() function.  Many of these fields are
@@ -1328,8 +1331,6 @@ int odp_tm_queue_threshold_config(odp_tm_queue_t tm_queue,
 int odp_tm_queue_wred_config(odp_tm_queue_t tm_queue,
 			     odp_pkt_color_t pkt_color,
 			     odp_tm_wred_t wred_profile);
-
-/**> @todo  odp_tm_queue_t odp_tm_queue_lookup(odp_tm_t odp_tm, char *name); */
 
 /** Topology setting functions */
 
@@ -1572,6 +1573,9 @@ int odp_tm_total_threshold_config(odp_tm_t odp_tm,
  * several to many dozens of microseconds.
  */
 void odp_tm_periodic_update(void);
+
+
+void odp_tm_stats_print(odp_tm_t odp_tm);
 
 /**
  * @}

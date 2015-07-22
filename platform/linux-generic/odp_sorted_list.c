@@ -11,6 +11,7 @@
 #include <malloc.h>
 #include <stdio.h>
 #include <odp.h>
+#include <odp_debug_internal.h>
 #include <odp_sorted_list_internal.h>
 
 typedef struct sorted_list_item_s sorted_list_item_t;
@@ -151,11 +152,11 @@ void odp_sorted_list_stats_print(odp_int_sorted_pool_t sorted_pool)
 	sorted_pool_t *pool;
 
 	pool = (sorted_pool_t *)sorted_pool;
-	printf("sorted_pool=0x%lX\n", sorted_pool);
-	printf("  max_sorted_lists=%u next_list_idx=%u\n",
-	       pool->max_sorted_lists, pool->next_list_idx);
-	printf("  total_inserts=%lu total_removes=%lu\n",
-	       pool->total_inserts, pool->total_removes);
+	ODP_DBG("sorted_pool=0x%lX\n", sorted_pool);
+	ODP_DBG("  max_sorted_lists=%u next_list_idx=%u\n",
+	        pool->max_sorted_lists, pool->next_list_idx);
+	ODP_DBG("  total_inserts=%lu total_removes=%lu\n",
+	        pool->total_inserts, pool->total_removes);
 }
 
 void odp_sorted_pool_destroy(odp_int_sorted_pool_t sorted_pool)

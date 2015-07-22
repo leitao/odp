@@ -269,10 +269,11 @@ static void aligned_free(void *mem_ptr)
 	free((void *)malloc_addr);
 }
 
-static uint32_t hash_name_and_kind(char *name, uint8_t name_kind)
+static uint32_t hash_name_and_kind(const char *name, uint8_t name_kind)
 {
 	PLATFORM_HASH_STATE hash_state;
 	uint32_t            name_len, name_word, hash_value;
+        uint32_t            bytes[4];
 
 	name_len = strlen(name);
 	PLATFORM_HASH32_INIT(hash_state, name_len);
@@ -284,7 +285,13 @@ static uint32_t hash_name_and_kind(char *name, uint8_t name_kind)
 		 * 32-bit aligned.  Shouldn't be too hard to add code to deal
 		 * with the case when this assumption is false.
 		 */
-		name_word = *((uint32_t *)name);
+		/* name_word = *((uint32_t *)name); */
+                bytes[0] = name[0];
+                bytes[1] = name[1];
+                bytes[2] = name[2];
+                bytes[3] = name[3];
+                name_word = (bytes[3] << 24) | (bytes[2] << 16) |
+                            (bytes[1] << 8) | bytes[0];
 		PLATFORM_HASH32(hash_state, name_word);
 
 		name_len -= 4;
@@ -295,8 +302,11 @@ static uint32_t hash_name_and_kind(char *name, uint8_t name_kind)
 		name_word = 0;
 
 		if (2 <= name_len) {
-			name_word = (uint32_t)*((uint16_t *)name);
-			name_len -= 2;
+                        /* name_word = (uint32_t)*((uint16_t *)name); */
+                        bytes[0] = name[0];
+                        bytes[1] = name[1];
+                        name_word |= (bytes[1] << 8) | bytes[0];
+ 			name_len -= 2;
 			name     += 2;
 		}
 
@@ -600,7 +610,7 @@ static name_tbl_entry_t *name_hash_tbl_lookup(uint32_t hash_value)
 	return NULL;
 }
 
-static name_tbl_entry_t *internal_name_lookup(char *name,
+static name_tbl_entry_t *internal_name_lookup(const char *name,
 					      uint8_t     name_kind)
 {
 	name_tbl_entry_t *name_tbl_entry;
@@ -1008,7 +1018,7 @@ static int name_hash_tbl_delete(name_tbl_entry_t *entry_to_delete,
 	return -1;
 }
 
-odp_int_name_t odp_int_name_tbl_add(char *name,
+odp_int_name_t odp_int_name_tbl_add(const char *name,
 				    uint8_t     name_kind,
 				    uint64_t    user_data)
 {
@@ -1119,7 +1129,7 @@ uint64_t odp_int_name_tbl_user_data(odp_int_name_t odp_name)
 		return name_tbl_entry->user_data;
 }
 
-odp_int_name_t odp_int_name_tbl_lookup(char *name, uint8_t name_kind)
+odp_int_name_t odp_int_name_tbl_lookup(const char *name, uint8_t name_kind)
 {
 	name_tbl_entry_t *name_tbl_entry;
 	odp_int_name_t    name_tbl_id;

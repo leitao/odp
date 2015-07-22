@@ -26,6 +26,8 @@
 
 #define INPUT_WORK_RING_SIZE  (16 * 1024)
 
+#define INVALID_PKT  0
+
 /* Macros to convert handles to internal pointers and vice versa.*/
 
 #define MAKE_ODP_TM_HANDLE(tm_system)  ((odp_tm_t)tm_system)
@@ -577,7 +579,7 @@ static void tm_system_free(tm_system_t *tm_system)
 	free(tm_system);
 }
 
-static void *tm_common_profile_create(char *name,
+static void *tm_common_profile_create(const char *name,
 				      profile_kind_t profile_kind,
 				      uint32_t object_size,
 				      tm_handle_t *profile_handle_ptr,
@@ -951,7 +953,8 @@ static void update_shaper_for_pkt_sent(tm_system_t *tm_system ODP_UNUSED,
 {
 	tm_shaper_params_t *shaper_params;
 	tm_shaper_action_t shaper_action;
-	uint32_t frame_len, tkn_count;
+	uint32_t frame_len;
+        int64_t  tkn_count;
 
 	shaper_action = shaper_obj->propagation_result.action;
 	shaper_obj->callback_time = 0;
@@ -967,7 +970,7 @@ static void update_shaper_for_pkt_sent(tm_system_t *tm_system ODP_UNUSED,
 	frame_len = sent_pkt_desc->pkt_len + sent_pkt_desc->shaper_len_adjust
 			+ shaper_params->len_adjust;
 
-	tkn_count = frame_len << 26;
+	tkn_count = ((int64_t) frame_len) << 26;
 	if ((shaper_action == DECR_BOTH) || (shaper_action == DECR_COMMIT))
 		shaper_obj->commit_cnt -= tkn_count;
 
@@ -1589,23 +1592,20 @@ static void tm_send_pkt(tm_system_t *tm_system,
 	int rc;
 
 	/* for (cnt = 1; cnt < max_consume_sends; cnt++) @todo */
-		for (cnt = 1; cnt < 1000; cnt++) {
-			pkt_desc = tm_system->egress_pkt_desc;
-			if (!pkt_desc)
-				return;
+	for (cnt = 1; cnt < 1000; cnt++) {
+	        pkt_desc = tm_system->egress_pkt_desc;
+		if (!pkt_desc)
+		          return;
 
-			tm_queue_obj =
-				tm_system->queue_num_tbl[pkt_desc->queue_num];
-			odp_pktio_send(tm_system->egress.pktio,
-				       &tm_queue_obj->pkt, 1);
-
-			tm_queue_obj->pkt = ODP_PACKET_INVALID;
-			tm_system->egress_pkt_desc = NULL;
-			rc = tm_consume_pkt_desc(tm_system,
-						 &tm_queue_obj->in_pkt_desc);
-			if (rc <= 0)
-				return;
-		}
+		tm_queue_obj = tm_system->queue_num_tbl[pkt_desc->queue_num];
+		tm_system->egress.egress_fcn(tm_queue_obj->pkt);
+		tm_queue_obj->pkt = INVALID_PKT;
+		tm_system->egress_pkt_desc = NULL;
+		rc = tm_consume_pkt_desc(tm_system,
+					 &tm_queue_obj->in_pkt_desc);
+		if (rc <= 0)
+		  return;
+	}
 }
 
 static int tm_process_input_work_queue(tm_system_t *tm_system,
@@ -1628,7 +1628,7 @@ static int tm_process_input_work_queue(tm_system_t *tm_system,
 		tm_queue_obj = work_item.tm_queue_obj;
 		pkt = work_item.pkt;
 		tm_queue_obj->pkts_rcvd_cnt++;
-		if (tm_queue_obj->pkt != ODP_PACKET_INVALID) {
+		if (tm_queue_obj->pkt != INVALID_PKT) {
 			/* If the tm_queue_obj already has a pkt to work with,
 			 * then just add this new pkt to the associated
 			 * odp_int_pkt_queue.
@@ -1709,6 +1709,7 @@ static void *tm_system_thread(void *arg)
 	uint8_t destroying;
 	int rc;
 
+	odp_init_local(ODP_THREAD_WORKER);
 	tm_system = arg;
 	odp_int_timer_wheel = tm_system->odp_int_timer_wheel;
 	input_work_queue = tm_system->input_work_queue;
@@ -1766,7 +1767,7 @@ void odp_tm_params_init(odp_tm_params_t *params)
 	memset(params, 0, sizeof(odp_tm_params_t));
 }
 
-odp_tm_t odp_tm_create(char *name, odp_tm_params_t *params)
+odp_tm_t odp_tm_create(const char *name, odp_tm_params_t *params)
 {
 	odp_int_name_t name_tbl_id;
 	tm_system_t *tm_system;
@@ -1880,7 +1881,7 @@ odp_tm_t odp_tm_create(char *name, odp_tm_params_t *params)
 	return odp_tm;
 }
 
-odp_tm_t odp_tm_find(char *name ODP_UNUSED,
+odp_tm_t odp_tm_find(const char *name ODP_UNUSED,
 		     odp_tm_capability_t *capability ODP_UNUSED)
 {
 	return ODP_TM_INVALID; /* @todo Not yet implemented. */
@@ -1922,7 +1923,7 @@ void odp_tm_shaper_params_init(odp_tm_shaper_params_t *params)
 	memset(params, 0, sizeof(odp_tm_shaper_params_t));
 }
 
-odp_tm_shaper_t odp_tm_shaper_create(char *name,
+odp_tm_shaper_t odp_tm_shaper_create(const char *name,
 				     odp_tm_shaper_params_t *params)
 {
 	tm_shaper_params_t *profile_obj;
@@ -1967,7 +1968,7 @@ int odp_tm_shaper_set(odp_tm_shaper_t shaper_profile,
 	return 0;
 }
 
-odp_tm_shaper_t odp_tm_shaper_lookup(char *name)
+odp_tm_shaper_t odp_tm_shaper_lookup(const char *name)
 {
 	return odp_int_name_tbl_lookup(name, ODP_TM_SHAPER_PROFILE_HANDLE);
 }
@@ -1977,7 +1978,7 @@ void odp_tm_sched_params_init(odp_tm_sched_params_t *params)
 	memset(params, 0, sizeof(odp_tm_sched_params_t));
 }
 
-odp_tm_sched_t odp_tm_sched_create(char *name,
+odp_tm_sched_t odp_tm_sched_create(const char *name,
 				   odp_tm_sched_params_t *params)
 {
 	odp_tm_sched_mode_t sched_mode;
@@ -2030,7 +2031,7 @@ int odp_tm_sched_set(odp_tm_sched_t sched_profile,
 	return 0;
 }
 
-odp_tm_sched_t odp_tm_sched_lookup(char *name)
+odp_tm_sched_t odp_tm_sched_lookup(const char *name)
 {
 	return odp_int_name_tbl_lookup(name, ODP_TM_SCHED_PROFILE_HANDLE);
 }
@@ -2040,7 +2041,7 @@ void odp_tm_threshold_params_init(odp_tm_threshold_params_t *params)
 	memset(params, 0, sizeof(odp_tm_threshold_params_t));
 }
 
-odp_tm_threshold_t odp_tm_threshold_create(char *name,
+odp_tm_threshold_t odp_tm_threshold_create(const char *name,
 					   odp_tm_threshold_params_t *params)
 {
 	tm_queue_thresholds_t *profile_obj;
@@ -2095,7 +2096,7 @@ int odp_tm_thresholds_set(odp_tm_threshold_t threshold_profile,
 	return 0;
 }
 
-odp_tm_threshold_t odp_tm_thresholds_lookup(char *name)
+odp_tm_threshold_t odp_tm_thresholds_lookup(const char *name)
 {
 	return odp_int_name_tbl_lookup(name, ODP_TM_THRESHOLD_PROFILE_HANDLE);
 }
@@ -2105,7 +2106,7 @@ void odp_tm_wred_params_init(odp_tm_wred_params_t *params)
 	memset(params, 0, sizeof(odp_tm_wred_params_t));
 }
 
-odp_tm_wred_t odp_tm_wred_create(char *name, odp_tm_wred_params_t *params)
+odp_tm_wred_t odp_tm_wred_create(const char *name, odp_tm_wred_params_t *params)
 {
 	odp_tm_wred_params_t *profile_obj;
 	odp_tm_wred_t wred_handle;
@@ -2146,7 +2147,7 @@ int odp_tm_wred_set(odp_tm_wred_t wred_profile, odp_tm_wred_params_t *params)
 	return 0;
 }
 
-odp_tm_wred_t odp_tm_wred_lookup(char *name)
+odp_tm_wred_t odp_tm_wred_lookup(const char *name)
 {
 	return odp_int_name_tbl_lookup(name, ODP_TM_WRED_PROFILE_HANDLE);
 }
@@ -2156,7 +2157,7 @@ void odp_tm_node_params_init(odp_tm_node_params_t *params)
 	memset(params, 0, sizeof(odp_tm_node_params_t));
 }
 
-odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, char *name,
+odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, const char *name,
 				 odp_tm_node_params_t *params)
 {
 	odp_int_sorted_list_t sorted_list;
@@ -2338,7 +2339,7 @@ int odp_tm_node_wred_config(odp_tm_node_t tm_node, odp_pkt_color_t pkt_color,
 	return rc;
 }
 
-odp_tm_node_t odp_tm_node_lookup(odp_tm_t odp_tm ODP_UNUSED, char *name)
+odp_tm_node_t odp_tm_node_lookup(odp_tm_t odp_tm ODP_UNUSED, const char *name)
 {
 	return odp_int_name_tbl_lookup(name, ODP_TM_NODE_HANDLE);
 }
@@ -2387,7 +2388,7 @@ odp_tm_queue_t odp_tm_queue_create(odp_tm_t odp_tm,
 	tm_queue_obj->queue_num = tm_system->next_queue_num++;
 	tm_queue_obj->tm_wred_node = tm_wred_node;
 	tm_queue_obj->odp_int_pkt_queue = odp_int_pkt_queue;
-	tm_queue_obj->pkt = ODP_PACKET_INVALID;
+	tm_queue_obj->pkt = INVALID_PKT;
 	odp_ticketlock_init(&tm_wred_node->tm_wred_node_lock);
 
 	tm_system->queue_num_tbl[tm_queue_obj->queue_num] = tm_queue_obj;
@@ -2733,8 +2734,7 @@ int odp_tm_total_threshold_config(odp_tm_t odp_tm,
 	return 0;
 }
 
-#ifdef NOT_USED /* @todo use or dleete this */
-static void odp_tm_stats_print(odp_tm_t odp_tm)
+void odp_tm_stats_print(odp_tm_t odp_tm)
 {
 	input_work_queue_t *input_work_queue;
 	tm_queue_obj_t *tm_queue_obj;
@@ -2775,7 +2775,6 @@ static void odp_tm_stats_print(odp_tm_t odp_tm)
 			tm_queue_obj->pkts_consumed_cnt);
 	}
 }
-#endif
 
 void odp_tm_periodic_update(void)
 {

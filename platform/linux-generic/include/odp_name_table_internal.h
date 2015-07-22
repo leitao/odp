@@ -37,11 +37,11 @@ typedef uint32_t odp_int_name_t;
 
 #define ODP_INT_NAME_LEN 32
 
-odp_int_name_t odp_int_name_tbl_add(char *name,
+odp_int_name_t odp_int_name_tbl_add(const char *name,
 				    uint8_t     name_kind,
 				    uint64_t    user_data);
 
-odp_int_name_t odp_int_name_tbl_lookup(char *name,
+odp_int_name_t odp_int_name_tbl_lookup(const char *name,
 				       uint8_t     name_kind);
 
 int odp_int_name_tbl_delete(odp_int_name_t odp_name);
