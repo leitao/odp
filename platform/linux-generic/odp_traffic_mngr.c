@@ -10,6 +10,9 @@
 #include <string.h>
 #include <malloc.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <odp/std_types.h>
 #include <odp/traffic_mngr.h>
@@ -21,6 +24,12 @@
 #include <odp_internal.h>
 #include <odp_debug_internal.h>
 
+
+typedef struct stat  file_stat_t;
+extern int fileno(FILE *stream);
+
+
+
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
@@ -28,7 +37,10 @@
 
 #define INVALID_PKT  0
 
-/* Macros to convert handles to internal pointers and vice versa.*/
+#define TM_QUEUE_MAGIC_NUM   0xBABEBABE
+#define TM_NODE_MAGIC_NUM    0xBEEFBEEF
+
+/* Macros to convert handles to internal pointers and vice versa. */
 
 #define MAKE_ODP_TM_HANDLE(tm_system)  ((odp_tm_t)tm_system)
 #define GET_TM_SYSTEM(odp_tm)          ((tm_system_t *)odp_tm)
@@ -51,7 +63,6 @@ typedef uint64_t tm_handle_t;
 
 #define PF_RM_CURRENT_BEST  0x01
 #define PF_NEW_PKT_IN       0x02
-#define PF_PRIORITY_BOOST   0x08
 #define PF_SHAPER_DELAYED   0x10
 #define PF_CHANGED_OUT_PKT  0x20
 #define PF_REACHED_EGRESS   0x40
@@ -72,6 +83,7 @@ typedef enum {
 	TM_WRED_PROFILE
 } profile_kind_t;
 
+typedef struct tm_queue_obj_s tm_queue_obj_t;
 typedef struct tm_node_obj_s tm_node_obj_t;
 
 typedef struct {
@@ -98,14 +110,19 @@ struct tm_wred_node_s {
 	odp_ticketlock_t tm_wred_node_lock;
 };
 
-typedef struct /* 64-bits long.*/
-{
-	uint32_t queue_num;
-	uint16_t pkt_len;
-	int8_t shaper_len_adjust;
-	uint8_t drop_eligible :1;
-	uint8_t pkt_color :2;
-	uint8_t unused :5;
+typedef struct { /* 64-bits long. */
+        union {
+                uint64_t word;
+                struct {
+                        uint32_t queue_num;
+                        uint16_t pkt_len;
+                        int8_t shaper_len_adjust;
+                        uint8_t drop_eligible :1;
+                        uint8_t pkt_color :2;
+                        uint8_t unused:1;
+                        uint8_t epoch :4;
+                };
+        };
 } pkt_desc_t;
 
 typedef struct {
@@ -137,12 +154,11 @@ typedef struct {
 	odp_bool_t enabled;
 } tm_shaper_params_t;
 
-typedef enum {
-	NO_CALLBACK, UNDELAY_PKT, BOOST_PRIORITY
-} tm_shaper_callback_reason_t;
+typedef enum { NO_CALLBACK, UNDELAY_PKT } tm_shaper_callback_reason_t;
 
 typedef struct {
-	tm_node_obj_t *next_tm_node; /* NULL if connected to egress.*/
+	tm_node_obj_t *next_tm_node; /* NULL if connected to egress. */
+        void *enclosing_entity;
 	tm_shaper_params_t *shaper_params;
 	tm_sched_params_t *sched_params;
 
@@ -160,18 +176,40 @@ typedef struct {
 	int64_t peak_cnt; /* Note token counters can go slightly negative */
 
 	uint64_t virtual_finish_time;
-	pkt_desc_t *in_pkt_desc;
-	pkt_desc_t *out_pkt_desc;
+	pkt_desc_t in_pkt_desc;
+	pkt_desc_t out_pkt_desc;
+        tm_queue_obj_t *timer_tm_queue;
 	uint8_t callback_reason;
 	tm_prop_t propagation_result;
 	uint8_t input_priority;
 	uint8_t out_priority;
 	uint8_t valid_finish_time;
 	uint8_t timer_outstanding;
+        uint8_t in_tm_node_obj;
 	uint8_t initialized;
 } tm_shaper_obj_t;
 
 typedef struct {
+	/* Note that the priority is implicit. */
+	pkt_desc_t smallest_pkt_desc;
+	uint64_t base_virtual_time;
+	uint64_t smallest_finish_time;
+	odp_int_sorted_list_t sorted_list;
+	uint32_t sorted_list_cnt; /* Debugging use only. */
+} tm_sched_state_t;
+
+typedef struct {
+        void *enclosing_entity;
+	pkt_desc_t out_pkt_desc; /* highest priority pkt desc. */
+	uint32_t priority_bit_mask; /* bit set if priority has pkt. */
+	uint8_t num_priorities;
+	uint8_t highest_priority;
+        uint8_t locked;
+	tm_sched_state_t sched_states[0];
+} tm_schedulers_obj_t;
+
+struct tm_queue_obj_s {
+        uint32_t magic_num;
 	uint32_t pkts_rcvd_cnt;
 	uint32_t pkts_enqueued_cnt;
 	uint32_t pkts_dequeued_cnt;
@@ -179,33 +217,26 @@ typedef struct {
 	odp_int_pkt_queue_t odp_int_pkt_queue;
 	tm_wred_node_t *tm_wred_node;
 	odp_packet_t pkt;
+        odp_packet_t sent_pkt;
+        uint32_t timer_seq;
+        uint8_t timer_reason;
+        uint8_t timer_cancels_outstanding;
+        tm_shaper_obj_t *timer_shaper;
+        tm_schedulers_obj_t *blocked_scheduler;
 	pkt_desc_t in_pkt_desc;
+        pkt_desc_t sent_pkt_desc;
 	tm_shaper_obj_t shaper_obj;
 	uint32_t queue_num;
+        uint16_t epoch;
 	uint8_t priority;
+        uint8_t blocked_priority;
 	uint8_t tm_idx;
-	uint8_t connected_to_egress;
-	uint8_t tm_nodes_to_egress;
-} tm_queue_obj_t;
-
-typedef struct {
-	/* Note that the priority is implicit. */
-	pkt_desc_t *smallest_pkt_desc;
-	uint64_t base_virtual_time;
-	uint64_t smallest_finish_time;
-	odp_int_sorted_list_t sorted_list;
-	uint32_t sorted_list_cnt; /* Debugging use only.*/
-} tm_sched_state_t;
-
-typedef struct {
-	uint32_t priority_bit_mask; /* bit set if priority has pkt. */
-	pkt_desc_t *out_pkt_desc; /* highest priority pkt desc. */
-	uint8_t num_priorities;
-	uint8_t highest_priority;
-	tm_sched_state_t sched_states[0];
-} tm_schedulers_obj_t;
+        uint8_t delayed_cnt;
+        uint8_t blocked_cnt;
+};
 
 struct tm_node_obj_s {
+        uint32_t magic_num;
 	tm_wred_node_t *tm_wred_node;
 	tm_shaper_obj_t shaper_obj;
 	tm_schedulers_obj_t *schedulers_obj;
@@ -213,7 +244,7 @@ struct tm_node_obj_s {
 	uint32_t max_fanin;
 	uint8_t level; /* Primarily for debugging */
 	uint8_t tm_idx;
-	uint8_t connected_to_egress;
+        uint8_t marked;
 };
 
 typedef struct {
@@ -243,6 +274,7 @@ typedef struct {
 	tm_queue_cnts_t queue_cnts;
 } tm_queue_info_t;
 
+
 typedef struct {
 	odp_ticketlock_t tm_system_lock;
 	odp_barrier_t tm_system_barrier;
@@ -255,7 +287,7 @@ typedef struct {
 	input_work_queue_t *input_work_queue;
 	tm_queue_cnts_t priority_queue_cnts;
 	tm_queue_cnts_t total_queue_cnts;
-	pkt_desc_t *egress_pkt_desc;
+	pkt_desc_t egress_pkt_desc;
 
 	odp_int_queue_pool_t odp_int_queue_pool;
 	odp_timer_wheel_t odp_int_timer_wheel;
@@ -272,21 +304,22 @@ typedef struct {
 	uint64_t current_cycles;
 	uint8_t tm_idx;
 	uint8_t first_enq;
+        odp_bool_t is_idle;
 
 	uint64_t shaper_green_cnt;
 	uint64_t shaper_yellow_cnt;
 	uint64_t shaper_red_cnt;
 } tm_system_t;
 
-static const odp_int_name_kind_t PROFILE_TO_HANDLE_KIND[ODP_TM_NUM_PROFILES] = {
-		[TM_SHAPER_PROFILE] = ODP_TM_SHAPER_PROFILE_HANDLE,
-		[TM_SCHED_PROFILE] = ODP_TM_SCHED_PROFILE_HANDLE,
-		[TM_THRESHOLD_PROFILE] = ODP_TM_THRESHOLD_PROFILE_HANDLE,
-		[TM_WRED_PROFILE] = ODP_TM_WRED_PROFILE_HANDLE };
+static const odp_int_name_kind_t PROFILE_TO_HANDLE_KIND[ODP_TM_NUM_PROFILES] =
+{
+        [TM_SHAPER_PROFILE] = ODP_TM_SHAPER_PROFILE_HANDLE,
+        [TM_SCHED_PROFILE] = ODP_TM_SCHED_PROFILE_HANDLE,
+        [TM_THRESHOLD_PROFILE] = ODP_TM_THRESHOLD_PROFILE_HANDLE,
+        [TM_WRED_PROFILE] = ODP_TM_WRED_PROFILE_HANDLE
+};
 
-static const pkt_desc_t EMPTY_PKT_DESC = { .queue_num = 0, .pkt_len = 0,
-		.shaper_len_adjust = 0, .drop_eligible = 0, .pkt_color = 0,
-		.unused = 0 };
+static const pkt_desc_t EMPTY_PKT_DESC = { .word = 0 };
 
 #define MAX_PRIORITIES ODP_TM_MAX_PRIORITIES
 #define NUM_SHAPER_COLORS ODP_NUM_SHAPER_COLORS
@@ -323,41 +356,9 @@ static tm_prop_t basic_prop_tbl[MAX_PRIORITIES][NUM_SHAPER_COLORS] = {
 	[7] = {
 		[SHAPER_GREEN] = { 7, DECR_BOTH },
 		[SHAPER_YELLOW] = { 7, DECR_BOTH },
-		[SHAPER_RED] = { 7, DELAY_PKT } } };
+		[SHAPER_RED] = { 7, DELAY_PKT } }
+};
 
-static tm_prop_t dual_rate_prop_tbl[MAX_PRIORITIES][NUM_SHAPER_COLORS] = {
-	[0] = {
-		[SHAPER_GREEN] = { 0, DECR_BOTH },
-		[SHAPER_YELLOW] = { 0, DECR_BOTH },
-		[SHAPER_RED] = { 0, DECR_BOTH } },
-	[1] = {
-		[SHAPER_GREEN] = { 1, DECR_BOTH },
-		[SHAPER_YELLOW] = { 1, DECR_BOTH },
-		[SHAPER_RED] = { 1, DELAY_PKT } },
-	[2] = {
-		[SHAPER_GREEN] = { 2, DECR_BOTH },
-		[SHAPER_YELLOW] = { 3, DECR_PEAK },
-		[SHAPER_RED] = { 3, DELAY_PKT } },
-	[3] = {
-		[SHAPER_GREEN] = { 3, DECR_PEAK },
-		[SHAPER_YELLOW] = { 3, DECR_PEAK },
-		[SHAPER_RED] = { 3, DELAY_PKT } },
-	[4] = {
-		[SHAPER_GREEN] = { 4, DECR_PEAK },
-		[SHAPER_YELLOW] = { 4, DECR_PEAK },
-		[SHAPER_RED] = { 4, DELAY_PKT } },
-	[5] = {
-		[SHAPER_GREEN] = { 5, DECR_PEAK },
-		[SHAPER_YELLOW] = { 5, DECR_PEAK },
-		[SHAPER_RED] = { 5, DELAY_PKT } },
-	[6] = {
-		[SHAPER_GREEN] = { 6, DECR_PEAK },
-		[SHAPER_YELLOW] = { 6, DECR_PEAK },
-		[SHAPER_RED] = { 6, DELAY_PKT } },
-	[7] = {
-		[SHAPER_GREEN] = { 7, DECR_PEAK },
-		[SHAPER_YELLOW] = { 7, DECR_PEAK },
-		[SHAPER_RED] = { 7, DELAY_PKT } } };
 
 /* Profile tables. */
 static dynamic_tbl_t odp_tm_profile_tbls[ODP_TM_NUM_PROFILES];
@@ -376,6 +377,59 @@ static void tm_queue_cnts_decrement(tm_system_t *tm_system,
 				    tm_wred_node_t *tm_wred_node,
 				    uint32_t priority,
 				    uint32_t frame_len);
+
+static int tm_demote_pkt_desc(tm_system_t *tm_system,
+                              tm_node_obj_t *tm_node_obj,
+                              tm_schedulers_obj_t *blocked_scheduler,
+                              tm_shaper_obj_t *timer_shaper,
+                              pkt_desc_t *demoted_pkt_desc);
+
+
+static tm_queue_obj_t *get_tm_queue_obj(tm_system_t *tm_system,
+                                        pkt_desc_t *pkt_desc)
+{
+        tm_queue_obj_t *tm_queue_obj;
+        uint32_t queue_num;
+
+        if ((pkt_desc == NULL) || (pkt_desc->queue_num == 0))
+                return NULL;
+
+        queue_num = pkt_desc->queue_num;
+        /* Assert(queue_num < tm_system->next_queue_num); */
+
+
+        tm_queue_obj = tm_system->queue_num_tbl[queue_num];
+        return tm_queue_obj;
+}
+
+static odp_bool_t pkt_descs_equal(pkt_desc_t *pkt_desc1, pkt_desc_t *pkt_desc2)
+{
+        if ((pkt_desc1 == NULL) || (pkt_desc1->queue_num == 0))
+                return 0;
+        else if ((pkt_desc2 == NULL) || (pkt_desc2->queue_num == 0))
+                return 0;
+        else if ((pkt_desc1->queue_num == pkt_desc2->queue_num) &&
+                 (pkt_desc1->epoch     == pkt_desc2->epoch)     &&
+                 (pkt_desc1->pkt_len   == pkt_desc2->pkt_len))
+                return 1;
+        else
+                return 0;
+}
+
+static odp_bool_t pkt_descs_not_equal(pkt_desc_t *pkt_desc1,
+                                      pkt_desc_t *pkt_desc2)
+{
+        if ((pkt_desc1 == NULL) || (pkt_desc1->queue_num == 0))
+                return 1;
+        else if ((pkt_desc2 == NULL) || (pkt_desc2->queue_num == 0))
+                return 1;
+        else if ((pkt_desc1->queue_num == pkt_desc2->queue_num) &&
+                 (pkt_desc1->epoch     == pkt_desc2->epoch)     &&
+                 (pkt_desc1->pkt_len   == pkt_desc2->pkt_len))
+                return 0;
+        else
+                return 1;
+}
 
 static void tm_init_random_data(tm_random_data_t *tm_random_data)
 {
@@ -419,7 +473,7 @@ static odp_bool_t tm_random_drop(tm_random_data_t *tm_random_data,
 	odp_bool_t drop;
 	uint32_t random_int, scaled_random_int;
 
-	/* Pick a random integer between 0 and 10000.*/
+	/* Pick a random integer between 0 and 10000. */
 	random_int = tm_random16(tm_random_data);
 	scaled_random_int = (random_int * 10000) >> 16;
 	drop = scaled_random_int < (uint32_t)drop_prob;
@@ -471,7 +525,7 @@ static void free_dynamic_tbl_entry(dynamic_tbl_t *dynamic_tbl ODP_UNUSED,
 				   uint32_t record_size ODP_UNUSED,
 				   uint32_t dynamic_idx ODP_UNUSED)
 {
-	/**< @todo Currently we don't bother with freeing. */
+	/* < @todo Currently we don't bother with freeing. */
 }
 
 static input_work_queue_t *input_work_queue_create(void)
@@ -814,20 +868,175 @@ static uint64_t cycles_till_not_red(tm_shaper_params_t *shaper_params,
 		return MIN(commit_delay, peak_delay);
 }
 
-static uint64_t cycles_till_green(tm_shaper_params_t *shaper_params,
-				  tm_shaper_obj_t *shaper_obj)
+static int delete_timer(tm_system_t *tm_system ODP_UNUSED,
+                        tm_queue_obj_t *tm_queue_obj,
+                        uint8_t cancel_timer)
 {
-	if (0 <= shaper_obj->commit_cnt)
-		return 0;
-	/*Shouldn't happen. */
+        tm_shaper_obj_t *shaper_obj;
 
-	return (-shaper_obj->commit_cnt) / shaper_params->commit_rate;
+        shaper_obj = tm_queue_obj->timer_shaper;
+        if (cancel_timer)
+                tm_queue_obj->timer_cancels_outstanding++;
+
+        if ((tm_queue_obj->timer_reason == NO_CALLBACK) ||
+            (shaper_obj == NULL))
+                return -1;
+
+        tm_queue_obj->timer_reason = NO_CALLBACK;
+        tm_queue_obj->timer_seq++;
+        tm_queue_obj->timer_shaper = NULL;
+
+        if (tm_queue_obj->delayed_cnt != 0)
+                tm_queue_obj->delayed_cnt--;
+
+        if (shaper_obj->timer_outstanding != 0)
+                shaper_obj->timer_outstanding--;
+
+        shaper_obj->timer_tm_queue = NULL;
+        shaper_obj->callback_reason = NO_CALLBACK;
+        return 0;
 }
 
-/* Returns < 0 if no pkt_desc output (i.e. action == DELAY_PKT), 0 if there
- * is a pkt_desc output but it is unchanged, or > 0 if there is a pkt_desc
- * output and it is different than what was just the output.
- */
+static void tm_unblock_pkt(tm_system_t *tm_system, pkt_desc_t *pkt_desc)
+{
+        tm_queue_obj_t *tm_queue_obj;
+
+        tm_queue_obj = get_tm_queue_obj(tm_system, pkt_desc);
+        tm_queue_obj->blocked_scheduler = NULL;
+        if (tm_queue_obj->blocked_cnt != 0)
+                tm_queue_obj->blocked_cnt--;
+}
+
+static void tm_block_pkt(tm_system_t *tm_system,
+                         tm_node_obj_t *tm_node_obj,
+                         tm_schedulers_obj_t *schedulers_obj,
+                         pkt_desc_t *pkt_desc,
+                         uint8_t priority)
+{
+        tm_queue_obj_t *tm_queue_obj;
+
+        /* Remove the blocked pkt from all downstream entities.
+         * This only happens if the propagation of another pkt caused this pkt
+         * to become blocked, since if the propagation of a pkt causes itself
+         * to be blocked then there can't be any downstream copies to remove.
+         * The caller signals us which case it is by whether the tm_node_obj
+         * is NULL or not.
+         */
+        tm_queue_obj = get_tm_queue_obj(tm_system, pkt_desc);
+        if (tm_node_obj != NULL)
+                tm_demote_pkt_desc(tm_system, tm_node_obj,
+                                   tm_queue_obj->blocked_scheduler,
+                                   tm_queue_obj->timer_shaper, pkt_desc);
+
+        tm_queue_obj->blocked_cnt = 1;
+        tm_queue_obj->blocked_scheduler = schedulers_obj;
+        tm_queue_obj->blocked_priority = priority;
+}
+
+static int tm_delay_pkt(tm_system_t *tm_system, tm_shaper_obj_t *shaper_obj,
+                        pkt_desc_t *pkt_desc)
+{
+        tm_queue_obj_t *tm_queue_obj;
+	uint64_t delay_cycles, wakeup_time, timer_context;
+
+        /* Calculate elapsed time before this pkt will be
+         * green or yellow.
+         */
+        delay_cycles = cycles_till_not_red(shaper_obj->shaper_params,
+                                           shaper_obj);
+        wakeup_time = tm_system->current_cycles + delay_cycles;
+
+        tm_queue_obj = get_tm_queue_obj(tm_system, pkt_desc);
+        tm_queue_obj->delayed_cnt++;
+
+        /* Insert into timer wheel. */
+        tm_queue_obj->timer_seq++;
+        timer_context = (((uint64_t) tm_queue_obj->timer_seq) << 32) |
+                        (((uint64_t) tm_queue_obj->queue_num) << 4);
+        odp_timer_wheel_insert(tm_system->odp_int_timer_wheel,
+                               wakeup_time, (void *) timer_context);
+
+        tm_queue_obj->timer_reason = UNDELAY_PKT;
+        tm_queue_obj->timer_shaper = shaper_obj;
+
+        shaper_obj->timer_outstanding++;
+        shaper_obj->callback_reason = UNDELAY_PKT;
+        shaper_obj->callback_time = wakeup_time;
+        shaper_obj->timer_tm_queue  = tm_queue_obj;
+        shaper_obj->in_pkt_desc = *pkt_desc;
+        shaper_obj->out_pkt_desc = EMPTY_PKT_DESC;
+        shaper_obj->valid_finish_time = 0;
+        return 1;
+}
+
+/* We call remove_pkt_from_shaper for pkts sent AND for pkts demoted. */
+
+static int remove_pkt_from_shaper(tm_system_t *tm_system,
+                                  tm_shaper_obj_t *shaper_obj,
+                                  pkt_desc_t *pkt_desc_to_remove,
+                                  uint8_t is_sent_pkt)
+{
+	tm_shaper_params_t *shaper_params;
+	tm_shaper_action_t shaper_action;
+        tm_queue_obj_t *tm_queue_obj;
+	uint32_t frame_len;
+        int64_t  tkn_count;
+
+        tm_queue_obj = get_tm_queue_obj(tm_system, pkt_desc_to_remove);
+        if (shaper_obj->in_pkt_desc.queue_num != pkt_desc_to_remove->queue_num)
+                return -1;
+
+	shaper_action = shaper_obj->propagation_result.action;
+        if ((tm_queue_obj->timer_shaper  == shaper_obj) ||
+            (shaper_obj->callback_reason == UNDELAY_PKT)) {
+                /* Need to delete the timer - which is either a cancel or just
+                 * a delete of a sent_pkt.
+                 */
+                if (tm_queue_obj->timer_reason == NO_CALLBACK)
+                        return -1;
+
+                if (! is_sent_pkt)
+                        tm_queue_obj->timer_cancels_outstanding++;
+
+                tm_queue_obj->timer_reason = NO_CALLBACK;
+                tm_queue_obj->timer_seq++;
+                tm_queue_obj->timer_shaper = NULL;
+                if (tm_queue_obj->delayed_cnt != 0)
+                        tm_queue_obj->delayed_cnt--;
+
+                if (shaper_obj->timer_outstanding != 0)
+                        shaper_obj->timer_outstanding--;
+
+                shaper_obj->callback_time = 0;
+                shaper_obj->callback_reason = NO_CALLBACK;
+                shaper_obj->timer_tm_queue = NULL;
+        }
+
+	shaper_obj->propagation_result.action = DECR_NOTHING;
+        shaper_obj->in_pkt_desc = EMPTY_PKT_DESC;
+        shaper_obj->out_pkt_desc = EMPTY_PKT_DESC;
+        shaper_obj->out_priority = 0;
+
+        if ((! is_sent_pkt) || (shaper_action == DECR_NOTHING) ||
+            (shaper_action == DELAY_PKT))
+                return 0;
+
+	shaper_params = shaper_obj->shaper_params;
+	frame_len = pkt_desc_to_remove->pkt_len +
+                    pkt_desc_to_remove->shaper_len_adjust +
+		    shaper_params->len_adjust;
+
+	tkn_count = ((int64_t) frame_len) << 26;
+	if ((shaper_action == DECR_BOTH) || (shaper_action == DECR_COMMIT))
+		shaper_obj->commit_cnt -= tkn_count;
+
+	if (shaper_params->peak_rate != 0)
+		if ((shaper_action == DECR_BOTH) ||
+		    (shaper_action == DECR_PEAK))
+			shaper_obj->peak_cnt -= tkn_count;
+        return 0;
+}
+
 static int tm_run_shaper(tm_system_t *tm_system, tm_shaper_obj_t *shaper_obj,
 			 pkt_desc_t *pkt_desc, uint8_t priority)
 {
@@ -835,25 +1044,17 @@ static int tm_run_shaper(tm_system_t *tm_system, tm_shaper_obj_t *shaper_obj,
 	tm_shaper_params_t *shaper_params;
 	odp_bool_t output_change;
 	tm_prop_t propagation;
-	uint64_t delay_cycles, wakeup_time;
-
-	if (!pkt_desc) {
-		output_change = !shaper_obj->out_pkt_desc;
-		shaper_obj->in_pkt_desc = pkt_desc;
-		shaper_obj->out_pkt_desc = pkt_desc;
-		shaper_obj->out_priority = 0;
-		return output_change;
-	}
 
 	shaper_params = shaper_obj->shaper_params;
-	shaper_obj->in_pkt_desc = pkt_desc;
-	shaper_obj->input_priority = priority;
 
 	if ((!shaper_params) || (shaper_params->enabled == 0)) {
-		output_change = (shaper_obj->out_pkt_desc != pkt_desc) ||
+		output_change =
+                    pkt_descs_not_equal(&shaper_obj->out_pkt_desc, pkt_desc) ||
 			(shaper_obj->out_priority != priority);
 
-		shaper_obj->out_pkt_desc = pkt_desc;
+                shaper_obj->in_pkt_desc = *pkt_desc;
+                shaper_obj->input_priority = priority;
+		shaper_obj->out_pkt_desc = *pkt_desc;
 		shaper_obj->out_priority = priority;
 		if (output_change)
 			shaper_obj->valid_finish_time = 0;
@@ -879,67 +1080,33 @@ static int tm_run_shaper(tm_system_t *tm_system, tm_shaper_obj_t *shaper_obj,
 		tm_system->shaper_red_cnt++;
 
 	/* Run thru propagation tbl to get shaper_action and out_priority */
-	if (shaper_params->dual_rate)
-		propagation = dual_rate_prop_tbl[priority][shaper_color];
-	else
-		propagation = basic_prop_tbl[priority][shaper_color];
+        propagation = basic_prop_tbl[priority][shaper_color];
+
+        /* See if this shaper had a previous timer associated with it.  If so
+         * we need to cancel it.
+         */
+        if ((shaper_obj->timer_outstanding != 0) &&
+            (shaper_obj->in_pkt_desc.queue_num != 0))
+                remove_pkt_from_shaper(tm_system, shaper_obj,
+                                       &shaper_obj->in_pkt_desc, 0);
 
 	shaper_obj->propagation_result = propagation;
-	if (propagation.action == DELAY_PKT) {
-		/* First see if we already have an outstanding timer for this
-		 * shaper_obj, and if not insert one into the timer_wheel.
-		 */
-		if (shaper_obj->timer_outstanding == 0) {
-			/* Calculate elapsed time before this pkt will be
-			 * green or yellow.
-			 */
-			delay_cycles = cycles_till_not_red(shaper_params,
-							   shaper_obj);
-			wakeup_time = tm_system->current_cycles + delay_cycles;
-
-			/* Insert into timer wheel. */
-			odp_timer_wheel_insert(
-					tm_system->odp_int_timer_wheel,
-					wakeup_time, (void *)shaper_obj);
-			shaper_obj->callback_time = wakeup_time;
-			shaper_obj->timer_outstanding = 1;
-		}
-
-		shaper_obj->callback_reason = UNDELAY_PKT;
-		shaper_obj->out_pkt_desc = NULL;
-		shaper_obj->valid_finish_time = 0;
-		return -1;
-	}
-
-	if (priority < propagation.output_priority) {
-		if (shaper_obj->timer_outstanding == 0) {
-			/*Calculate elapsed time before this pkt will be able
-			 * to be full priority
-			 */
-			delay_cycles = cycles_till_green(shaper_params,
-							 shaper_obj);
-			wakeup_time = tm_system->current_cycles + delay_cycles;
-
-			/*Insert into timer wheel*/
-			odp_timer_wheel_insert(
-					tm_system->odp_int_timer_wheel,
-					wakeup_time, (void *)shaper_obj);
-			shaper_obj->callback_time = wakeup_time;
-			shaper_obj->timer_outstanding = 1;
-		}
-
-		shaper_obj->callback_reason = BOOST_PRIORITY;
-	} else {
+	if (propagation.action == DELAY_PKT)
+            return tm_delay_pkt(tm_system, shaper_obj, pkt_desc);
+	else {
 		shaper_obj->callback_time = 0;
 		shaper_obj->callback_reason = NO_CALLBACK;
 	}
 
-	/*Propagate pkt_desc to the next level*/
+	/* Propagate pkt_desc to the next level */
 	priority = propagation.output_priority;
-	output_change = (shaper_obj->out_pkt_desc != pkt_desc) ||
-		(shaper_obj->out_priority != priority);
+	output_change =
+            pkt_descs_not_equal(&shaper_obj->out_pkt_desc, pkt_desc) ||
+            (shaper_obj->out_priority != priority);
 
-	shaper_obj->out_pkt_desc = pkt_desc;
+	shaper_obj->in_pkt_desc = *pkt_desc;
+	shaper_obj->input_priority = priority;
+	shaper_obj->out_pkt_desc = *pkt_desc;
 	shaper_obj->out_priority = priority;
 	if (output_change)
 		shaper_obj->valid_finish_time = 0;
@@ -947,38 +1114,6 @@ static int tm_run_shaper(tm_system_t *tm_system, tm_shaper_obj_t *shaper_obj,
 	return output_change;
 }
 
-static void update_shaper_for_pkt_sent(tm_system_t *tm_system ODP_UNUSED,
-				       tm_shaper_obj_t *shaper_obj,
-				       pkt_desc_t *sent_pkt_desc)
-{
-	tm_shaper_params_t *shaper_params;
-	tm_shaper_action_t shaper_action;
-	uint32_t frame_len;
-        int64_t  tkn_count;
-
-	shaper_action = shaper_obj->propagation_result.action;
-	shaper_obj->callback_time = 0;
-	shaper_obj->callback_reason = NO_CALLBACK;
-	shaper_obj->propagation_result.action = DECR_NOTHING;
-
-	if (shaper_action == DECR_NOTHING)
-		return;
-	else if (shaper_action == DELAY_PKT)
-		return; /* ERROR - should never happen. */
-
-	shaper_params = shaper_obj->shaper_params;
-	frame_len = sent_pkt_desc->pkt_len + sent_pkt_desc->shaper_len_adjust
-			+ shaper_params->len_adjust;
-
-	tkn_count = ((int64_t) frame_len) << 26;
-	if ((shaper_action == DECR_BOTH) || (shaper_action == DECR_COMMIT))
-		shaper_obj->commit_cnt -= tkn_count;
-
-	if (shaper_params->peak_rate != 0)
-		if ((shaper_action == DECR_BOTH) ||
-		    (shaper_action == DECR_PEAK))
-			shaper_obj->peak_cnt -= tkn_count;
-}
 
 static int tm_set_finish_time(tm_schedulers_obj_t *schedulers_obj,
 			      tm_shaper_obj_t *prod_shaper_obj,
@@ -991,7 +1126,7 @@ static int tm_set_finish_time(tm_schedulers_obj_t *schedulers_obj,
 	uint64_t base_virtual_time, virtual_finish_time;
 	uint32_t inverted_weight, frame_len, frame_weight;
 
-	/*Check to see if this pkt_desc is "new" or not */
+	/* Check to see if this pkt_desc is "new" or not */
 	if (prod_shaper_obj->valid_finish_time) {
 		/* return 0 or 1 depending on whether this pkt_desc is the
 		 * current chosen one
@@ -999,19 +1134,19 @@ static int tm_set_finish_time(tm_schedulers_obj_t *schedulers_obj,
 		return 0;
 	}
 
-	/*First determine the virtual finish_time of this new pkt.*/
+	/* First determine the virtual finish_time of this new pkt. */
 	sched_params = prod_shaper_obj->sched_params;
 	if (!sched_params) {
 		mode = ODP_TM_BYTE_BASED_WEIGHTS;
 		inverted_weight = 4096;
-		/*Same as a weight of 16.*/
+		/* Same as a weight of 16. */
 	} else {
 		mode = sched_params->sched_modes[new_priority];
 		inverted_weight = sched_params->inverted_weights[new_priority];
 	}
 
 	frame_len = new_pkt_desc->pkt_len;
-	if (mode == ODP_TM_BYTE_BASED_WEIGHTS)
+	if (mode == ODP_TM_FRAME_BASED_WEIGHTS)
 		frame_len = 256;
 
 	frame_weight = ((inverted_weight * frame_len) + (1 << 15)) >> 16;
@@ -1026,100 +1161,33 @@ static int tm_set_finish_time(tm_schedulers_obj_t *schedulers_obj,
 	return 1;
 }
 
-static uint32_t tm_run_scheduler(tm_system_t *tm_system,
-				 tm_shaper_obj_t *prod_shaper_obj,
-				 tm_schedulers_obj_t *schedulers_obj,
-				 pkt_desc_t *new_pkt_desc,
-				 uint8_t new_priority,
-				 pkt_desc_t *sent_pkt_desc,
-				 uint32_t propagate_flags)
+static int tm_run_scheduler(tm_system_t *tm_system,
+                            tm_shaper_obj_t *prod_shaper_obj,
+                            tm_schedulers_obj_t *schedulers_obj,
+                            pkt_desc_t *new_pkt_desc,
+                            uint8_t new_priority)
 {
-	odp_int_sorted_pool_t sorted_pool;
-	tm_sched_state_t *best_sched_state, *new_sched_state;
-	pkt_desc_t *best_pkt_desc, *pkt_desc;
-	uint64_t virtual_finish_time, new_virtual_finish_time;
-	uint32_t best_priority;
+	tm_sched_state_t *new_sched_state;
+        tm_node_obj_t *tm_node_obj;
+        pkt_desc_t prev_best_pkt_desc;
+	uint64_t new_finish_time, prev_best_time;
+        uint32_t new_priority_mask;
 	int rc;
-
-	if (propagate_flags & PF_PRIORITY_BOOST) {
-		/* Check to see if the new_pkt_desc (the one whose priority is
-		 * being boosted) is the current best or will be.
-		 */
-		ODP_DBG("%s BOOST_PRIORITY Not Yet Implemented\n", __func__);
-		return propagate_flags;
-		/* @todo */
-	}
-
-	if (propagate_flags & PF_RM_CURRENT_BEST) {
-		best_priority = schedulers_obj->highest_priority;
-		best_sched_state = &schedulers_obj->sched_states[best_priority];
-		if (best_sched_state->smallest_pkt_desc != sent_pkt_desc) {
-			/* ODP_DBG("%s nonmatching sent_pkt_desc\n",
-			 * __func__); @todo */
-			return propagate_flags;
-		}
-
-		best_sched_state->smallest_finish_time = -1;
-		best_sched_state->smallest_pkt_desc = NULL;
-		schedulers_obj->out_pkt_desc = NULL;
-		schedulers_obj->priority_bit_mask &= ~(1ULL << best_priority);
-		propagate_flags |= PF_CHANGED_OUT_PKT;
-
-		/* Get the pkt_desc with the smallest virtual finish time from
-		 * the sorted list at this priority level.  This could be
-		 * NULL.  If non-NULL this needs to be recorded as the current
-		 * best choice.  (if non-NULL).
-		 */
-		if (best_sched_state->sorted_list_cnt != 0) {
-			sorted_pool = tm_system->odp_int_sorted_pool;
-			pkt_desc =
-				odp_sorted_list_remove
-				(sorted_pool,
-				 best_sched_state->sorted_list,
-				 &virtual_finish_time);
-			if (!pkt_desc)
-				return propagate_flags;
-			/* @todo */
-
-			best_sched_state->smallest_finish_time =
-				virtual_finish_time;
-			best_sched_state->smallest_pkt_desc = pkt_desc;
-			schedulers_obj->out_pkt_desc = pkt_desc;
-			schedulers_obj->priority_bit_mask |=
-				1ULL << best_priority;
-			best_sched_state->sorted_list_cnt--;
-		} else if (schedulers_obj->priority_bit_mask != 0) {
-			/* Set the highest_priority and out_pkt_desc of the
-			 * schedulers_obj.  Such a pkt_desc must exist because
-			 * otherwise priority_bit_mask would be 0.
-			 */
-			best_priority = __builtin_ctz(
-				schedulers_obj->priority_bit_mask);
-			best_sched_state =
-				&schedulers_obj->sched_states[best_priority];
-			best_pkt_desc = best_sched_state->smallest_pkt_desc;
-
-			schedulers_obj->highest_priority = best_priority;
-			schedulers_obj->out_pkt_desc = best_pkt_desc;
-		}
-	}
-
-	if (!new_pkt_desc)
-		return propagate_flags;
 
 	/* Determine the virtual finish_time of this new pkt. */
 	tm_set_finish_time(schedulers_obj, prod_shaper_obj, new_pkt_desc,
 			   new_priority);
-	new_virtual_finish_time = prod_shaper_obj->virtual_finish_time;
+	new_finish_time = prod_shaper_obj->virtual_finish_time;
 	new_sched_state = &schedulers_obj->sched_states[new_priority];
 
-	if (new_sched_state->smallest_pkt_desc) {
+        prev_best_pkt_desc = new_sched_state->smallest_pkt_desc;
+        prev_best_time     = new_sched_state->smallest_finish_time;
+	if (prev_best_pkt_desc.queue_num) {
 		/* See if this new pkt has the smallest virtual finish time
 		 * for all fanin at the given input priority level, as
 		 * represented by the new_sched_state.
 		 */
-		if (new_sched_state->smallest_finish_time
-		    <= new_virtual_finish_time) {
+		if (prev_best_time <= new_finish_time) {
 			/* Since this new pkt doesn't have the smallest
 			 * virtual finish time, just insert it into this
 			 * sched_state's list sorted by virtual finish times.
@@ -1127,13 +1195,15 @@ static uint32_t tm_run_scheduler(tm_system_t *tm_system,
 			rc = odp_sorted_list_insert(
 				tm_system->odp_int_sorted_pool,
 				new_sched_state->sorted_list,
-				new_virtual_finish_time, new_pkt_desc);
-			if (rc < 0)
-				return propagate_flags;
-			/* @todo */
+				new_finish_time, new_pkt_desc->word);
 
-			new_sched_state->sorted_list_cnt++;
-			return propagate_flags;
+			if (0 <= rc) {
+                                new_sched_state->sorted_list_cnt++;
+                                tm_block_pkt(tm_system, NULL, schedulers_obj,
+                                             new_pkt_desc, new_priority);
+                        }
+
+			return 0;
 		}
 
 		/* Since this new pkt does have the smallest virtual finish
@@ -1143,120 +1213,363 @@ static uint32_t tm_run_scheduler(tm_system_t *tm_system,
 		 */
 		rc = odp_sorted_list_insert
 			(tm_system->odp_int_sorted_pool,
-			 new_sched_state->sorted_list,
-			 new_sched_state->smallest_finish_time,
-			 new_sched_state->smallest_pkt_desc);
+			 new_sched_state->sorted_list, prev_best_time,
+			 prev_best_pkt_desc.word);
 		if (rc < 0)
-			return propagate_flags;
-		/* @todo */
+                        return rc;
 
 		new_sched_state->sorted_list_cnt++;
+                tm_node_obj = schedulers_obj->enclosing_entity;
+                tm_block_pkt(tm_system, tm_node_obj, schedulers_obj,
+                             &prev_best_pkt_desc, new_priority);
 	}
 
 	/* Record the fact that this new pkt is now the best choice of this
 	 * sched_state.
 	 */
-	new_sched_state->smallest_finish_time = new_virtual_finish_time;
-	new_sched_state->smallest_pkt_desc = new_pkt_desc;
+	new_sched_state->smallest_finish_time = new_finish_time;
+	new_sched_state->smallest_pkt_desc = *new_pkt_desc;
 	schedulers_obj->priority_bit_mask |= 1ULL << new_priority;
 
 	/* Next see if this new pkt is the highest priority pkt of all of the
 	 * schedulers within this tm_node (recalling that the highest priority
 	 * has the lowest priority value).
 	 */
-	if ((schedulers_obj->priority_bit_mask & ((1ULL << new_priority) - 1))
-	    != 0)
-		return propagate_flags;
+        new_priority_mask = (1ULL << new_priority) - 1;
+	if ((schedulers_obj->priority_bit_mask & new_priority_mask) != 0) {
+                tm_block_pkt(tm_system, NULL, schedulers_obj, new_pkt_desc,
+                             new_priority);
+		return 0;
+        } else if (schedulers_obj->out_pkt_desc.queue_num != 0) {
+                tm_node_obj = schedulers_obj->enclosing_entity;
+                tm_block_pkt(tm_system, tm_node_obj, schedulers_obj,
+                             &schedulers_obj->out_pkt_desc,
+                             schedulers_obj->highest_priority);
+        }
 
 	schedulers_obj->highest_priority = new_priority;
-	schedulers_obj->out_pkt_desc = new_pkt_desc;
-	return propagate_flags | PF_CHANGED_OUT_PKT;
+	schedulers_obj->out_pkt_desc = *new_pkt_desc;
+	return 1;
 }
 
-static void update_scheduler_for_sent_pkt(tm_schedulers_obj_t *schedulers_obj)
+/* We call remove_pkt_from_scheduler both for pkts sent AND for pkts demoted. */
+
+static int remove_pkt_from_scheduler(tm_system_t *tm_system,
+                                     tm_schedulers_obj_t *schedulers_obj,
+                                     pkt_desc_t *pkt_desc_to_remove,
+                                     uint8_t pkt_desc_priority,
+                                     uint8_t is_sent_pkt)
 {
-	tm_sched_state_t *sched_state;
-	uint32_t priority;
+	odp_int_sorted_pool_t sorted_pool;
+        odp_int_sorted_list_t sorted_list;
+	tm_sched_state_t *sched_state, *best_sched_state;
+	pkt_desc_t best_pkt_desc, pkt_desc;
+	uint64_t finish_time;
+	uint32_t priority, best_priority;
+        uint8_t found;
+        int rc;
 
-	priority = schedulers_obj->highest_priority;
+        if (is_sent_pkt)
+                priority = schedulers_obj->highest_priority;
+        else
+                priority = pkt_desc_priority;
+
 	sched_state = &schedulers_obj->sched_states[priority];
-	sched_state->base_virtual_time = sched_state->smallest_finish_time;
+        sorted_pool = tm_system->odp_int_sorted_pool;
+        sorted_list = sched_state->sorted_list;
+        found       = 0;
+        if (pkt_descs_equal(&sched_state->smallest_pkt_desc,
+                            pkt_desc_to_remove))
+                found = 1;
+        else if (! is_sent_pkt) {
+                rc = odp_sorted_list_delete(sorted_pool, sorted_list,
+                                            pkt_desc_to_remove->word);
+                if (0 <= rc) {
+                        sched_state->sorted_list_cnt--;
+                        return 0;
+                }
+        }
+
+        if (! found)
+                return -1;
+
+        /* This is the case where the pkt_desc_to_remove is NOT in a sorted
+         * list but is instead the best/smallest pkt_desc for "some" priority
+         * level.  If is_sent_pkt is TRUE, then this priority level MUST be
+         * the highest_priority level, but if FALSE then this priority level
+         * can be at any priority.
+         */
+        if (is_sent_pkt) {
+                finish_time = sched_state->smallest_finish_time;
+                sched_state->base_virtual_time = finish_time;
+        }
+
+        sched_state->smallest_finish_time = 0;
+        sched_state->smallest_pkt_desc = EMPTY_PKT_DESC;
+        schedulers_obj->priority_bit_mask &= ~(1ULL << priority);
+        if (pkt_descs_equal(&schedulers_obj->out_pkt_desc, pkt_desc_to_remove)) {
+                schedulers_obj->out_pkt_desc = EMPTY_PKT_DESC;
+                schedulers_obj->highest_priority = 0;
+        }
+
+        /* Now that we have removed the pkt_desc_to_remove, we need to see if
+         * there is a new pkt_desc available to become the best pkt_desc for
+         * this priority level/sched_state.
+         */
+        if (sched_state->sorted_list_cnt != 0) {
+                rc = odp_sorted_list_remove(sorted_pool, sorted_list,
+                                            &finish_time, &pkt_desc.word);
+                if (rc <= 0)
+                        return -1;
+
+                sched_state->sorted_list_cnt--;
+                sched_state->smallest_finish_time = finish_time;
+                sched_state->smallest_pkt_desc = pkt_desc;
+                schedulers_obj->priority_bit_mask |= 1ULL << priority;
+        }
+
+        /* Finally we must see if there is a new_pkt desc that is now the
+         * best/smallest for this entire schedulers_obj - which could even be
+         * the pkt_desc we just removed from the sorted_list, or not.
+         */
+        if (schedulers_obj->priority_bit_mask == 0) {
+                schedulers_obj->out_pkt_desc = EMPTY_PKT_DESC;
+                schedulers_obj->highest_priority = 0;
+        } else {
+                /* Set the highest_priority and out_pkt_desc of the
+                 * schedulers_obj.  Such a pkt_desc must exist because
+                 * otherwise priority_bit_mask would be 0.
+                 */
+                best_priority =__builtin_ctz(schedulers_obj->priority_bit_mask);
+                best_sched_state = &schedulers_obj->sched_states[best_priority];
+                best_pkt_desc = best_sched_state->smallest_pkt_desc;
+
+                schedulers_obj->highest_priority = best_priority;
+                schedulers_obj->out_pkt_desc = best_pkt_desc;
+                tm_unblock_pkt(tm_system, &best_pkt_desc);
+        }
+
+        return 0;
 }
 
-static uint32_t tm_propagate_pkt_desc(tm_system_t *tm_system,
-				      tm_shaper_obj_t *shaper_obj,
-				      pkt_desc_t *new_pkt_desc,
-				      uint8_t new_priority,
-				      pkt_desc_t *sent_pkt_desc,
-				      uint32_t propagate_flags)
+static int tm_propagate_pkt_desc(tm_system_t *tm_system,
+                                 tm_shaper_obj_t *shaper_obj,
+                                 pkt_desc_t *new_pkt_desc,
+                                 uint8_t new_priority)
 {
 	tm_schedulers_obj_t *schedulers_obj;
 	tm_node_obj_t *tm_node_obj;
-	uint32_t flags;
+        int rc, ret_code;
 
-	/*Run shaper. */
-	tm_run_shaper(tm_system, shaper_obj, new_pkt_desc, new_priority);
-
-	new_pkt_desc = shaper_obj->out_pkt_desc;
-	new_priority = shaper_obj->out_priority;
-	if (!new_pkt_desc)
-		propagate_flags &= ~PF_NEW_PKT_IN;
-	else
-		propagate_flags |= PF_NEW_PKT_IN;
+	/* Run shaper. */
+        tm_run_shaper(tm_system, shaper_obj, new_pkt_desc, new_priority);
 
 	tm_node_obj = shaper_obj->next_tm_node;
-	while (tm_node_obj) /*not at egress */ {
+	while (tm_node_obj) { /* not at egress */
 		/* Run scheduler, including priority multiplexor. */
+                new_pkt_desc = &shaper_obj->out_pkt_desc;
+                new_priority = shaper_obj->out_priority;
+                if ((new_pkt_desc == NULL) || (new_pkt_desc->queue_num == 0))
+                        return 0;
+
 		schedulers_obj = tm_node_obj->schedulers_obj;
-		flags = tm_run_scheduler(tm_system, shaper_obj, schedulers_obj,
-					 new_pkt_desc, new_priority,
-					 sent_pkt_desc,
-					 propagate_flags);
-		if (flags & PF_ERROR)
-			return -1;
+		rc = tm_run_scheduler(tm_system, shaper_obj, schedulers_obj,
+                                      new_pkt_desc, new_priority);
+
+                if (rc <= 0)
+                        return rc;
 
 		/* Run shaper. */
-		new_pkt_desc = schedulers_obj->out_pkt_desc;
+		new_pkt_desc = &schedulers_obj->out_pkt_desc;
 		new_priority = schedulers_obj->highest_priority;
 		shaper_obj = &tm_node_obj->shaper_obj;
-		tm_run_shaper(tm_system, shaper_obj, new_pkt_desc,
-			      new_priority);
+                if ((new_pkt_desc == NULL) || (new_pkt_desc->queue_num == 0))
+                        return 0;
 
-		new_pkt_desc = shaper_obj->out_pkt_desc;
-		new_priority = shaper_obj->out_priority;
-		if (!shaper_obj->out_pkt_desc)
-			propagate_flags &= ~PF_NEW_PKT_IN;
-		else
-			propagate_flags |= PF_NEW_PKT_IN;
+                tm_run_shaper(tm_system, shaper_obj, new_pkt_desc,
+                              new_priority);
 
-		tm_node_obj = shaper_obj->next_tm_node;
+		tm_node_obj  = shaper_obj->next_tm_node;
 	}
 
-	if (!new_pkt_desc)
-		return propagate_flags;
+        new_pkt_desc = &shaper_obj->out_pkt_desc;
+        new_priority = shaper_obj->out_priority;
+        ret_code = 0;
+	if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0)) {
+                tm_system->egress_pkt_desc = *new_pkt_desc;
+                ret_code = 1;
+        }
 
-	/*reached egress. return 1. */
-	tm_system->egress_pkt_desc = new_pkt_desc;
-	return propagate_flags | PF_REACHED_EGRESS;
+        return ret_code;
 }
 
 static void tm_pkt_desc_init(pkt_desc_t *pkt_desc, odp_packet_t pkt,
-			     uint32_t queue_num)
+                             tm_queue_obj_t *tm_queue_obj)
 {
-	pkt_desc->queue_num = queue_num;
+        tm_queue_obj->epoch++;
+	pkt_desc->queue_num = tm_queue_obj->queue_num;
 	pkt_desc->pkt_len = odp_packet_len(pkt);
 	pkt_desc->shaper_len_adjust = odp_packet_shaper_len_adjust(pkt);
 	pkt_desc->drop_eligible = odp_packet_drop_eligible(pkt);
 	pkt_desc->pkt_color = odp_packet_color(pkt);
+        pkt_desc->epoch = tm_queue_obj->epoch & 0x0F;
 }
 
-static void tm_pkt_sent_updates(tm_system_t *tm_system,
-				pkt_desc_t *sent_pkt_desc)
+static int tm_demote_pkt_desc(tm_system_t *tm_system,
+                              tm_node_obj_t *tm_node_obj,
+                              tm_schedulers_obj_t *blocked_scheduler,
+                              tm_shaper_obj_t *timer_shaper,
+                              pkt_desc_t *demoted_pkt_desc)
 {
-	tm_shaper_obj_t *shaper_obj;
-	tm_queue_obj_t *tm_queue_obj;
+	tm_schedulers_obj_t *schedulers_obj;
+        tm_shaper_obj_t *shaper_obj;
+        pkt_desc_t *new_pkt_desc;
+        uint8_t new_priority, demoted_priority;
+        int ret_code;
+
+        shaper_obj = &tm_node_obj->shaper_obj;
+        if ((blocked_scheduler == NULL) && (timer_shaper == NULL))
+                return 0;
+
+        if (tm_node_obj->schedulers_obj == blocked_scheduler)
+                return 0;
+
+        demoted_priority = 3;
+        if (pkt_descs_equal(&shaper_obj->out_pkt_desc, demoted_pkt_desc))
+            demoted_priority = shaper_obj->out_priority;
+
+        /* See if this first shaper_obj is delaying the demoted_pkt_desc */
+        if (pkt_descs_equal(&shaper_obj->out_pkt_desc, demoted_pkt_desc))
+                demoted_priority = shaper_obj->out_priority;
+
+        remove_pkt_from_shaper(tm_system, shaper_obj, demoted_pkt_desc, 0);
+        if (shaper_obj == timer_shaper) {
+                demoted_pkt_desc = NULL;
+                return 0;
+        }
+
+        tm_node_obj = shaper_obj->next_tm_node;
+
+	while (tm_node_obj) { /* not at egress */
+                schedulers_obj = tm_node_obj->schedulers_obj;
+                if (demoted_pkt_desc != NULL) {
+                        remove_pkt_from_scheduler(tm_system, schedulers_obj,
+                                                  demoted_pkt_desc,
+                                                  demoted_priority, 0);
+                        if (schedulers_obj == blocked_scheduler)
+                                demoted_pkt_desc = NULL;
+                }
+
+                new_pkt_desc = &shaper_obj->out_pkt_desc;
+                new_priority = shaper_obj->out_priority;
+                if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0))
+                        tm_run_scheduler(tm_system, shaper_obj, schedulers_obj,
+                                         new_pkt_desc, new_priority);
+                else if (demoted_pkt_desc == NULL)
+                        return 0;
+
+		new_pkt_desc = &schedulers_obj->out_pkt_desc;
+		new_priority = schedulers_obj->highest_priority;
+		shaper_obj   = &tm_node_obj->shaper_obj;
+
+                if (demoted_pkt_desc != NULL) {
+                        if (pkt_descs_equal(&shaper_obj->out_pkt_desc,
+                                            demoted_pkt_desc))
+                                demoted_priority = shaper_obj->out_priority;
+
+                        remove_pkt_from_shaper(tm_system, shaper_obj,
+                                               demoted_pkt_desc, 0);
+                        if (shaper_obj == timer_shaper)
+                                demoted_pkt_desc = NULL;
+                }
+
+		if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0))
+                        tm_run_shaper(tm_system, shaper_obj, new_pkt_desc,
+                                      new_priority);
+                else if (demoted_pkt_desc == NULL)
+                        return 0;
+
+		tm_node_obj = shaper_obj->next_tm_node;
+	}
+
+        new_pkt_desc = &shaper_obj->out_pkt_desc;
+        new_priority = shaper_obj->out_priority;
+        ret_code = 0;
+	if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0)) {
+                tm_system->egress_pkt_desc = *new_pkt_desc;
+                ret_code = 1;
+        }
+
+        return ret_code;
+}
+
+static int tm_consume_pkt_desc(tm_system_t *tm_system,
+                               tm_shaper_obj_t *shaper_obj,
+                               pkt_desc_t *new_pkt_desc,
+                               uint8_t new_priority,
+                               pkt_desc_t *sent_pkt_desc)
+{
+	tm_schedulers_obj_t *schedulers_obj;
 	tm_node_obj_t *tm_node_obj;
+        uint8_t sent_priority;
+        int rc, ret_code;
+
+	remove_pkt_from_shaper(tm_system, shaper_obj, sent_pkt_desc, 1);
+        if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0))
+                tm_run_shaper(tm_system, shaper_obj, new_pkt_desc,
+                              new_priority);
+
+	tm_node_obj = shaper_obj->next_tm_node;
+	while (tm_node_obj) { /* not at egress */
+                schedulers_obj = tm_node_obj->schedulers_obj;
+                sent_priority = schedulers_obj->highest_priority;
+		remove_pkt_from_scheduler(tm_system, schedulers_obj,
+                                          sent_pkt_desc, sent_priority, 1);
+
+                new_pkt_desc = &shaper_obj->out_pkt_desc;
+                new_priority = shaper_obj->out_priority;
+
+                if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0)) {
+                        rc = tm_run_scheduler(tm_system, shaper_obj,
+                                              schedulers_obj,
+                                              new_pkt_desc, new_priority);
+                        if (rc < 0)
+                                return rc;
+                }
+
+		new_pkt_desc = &schedulers_obj->out_pkt_desc;
+		new_priority = schedulers_obj->highest_priority;
+
+		shaper_obj = &tm_node_obj->shaper_obj;
+		remove_pkt_from_shaper(tm_system, shaper_obj, sent_pkt_desc, 1);
+		if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0))
+                        tm_run_shaper(tm_system, shaper_obj, new_pkt_desc,
+                                      new_priority);
+
+		tm_node_obj = shaper_obj->next_tm_node;
+	}
+
+        new_pkt_desc = &shaper_obj->out_pkt_desc;
+        new_priority = shaper_obj->out_priority;
+
+        ret_code = 0;
+	if ((new_pkt_desc != NULL) && (new_pkt_desc->queue_num != 0)) {
+                tm_system->egress_pkt_desc = *new_pkt_desc;
+                ret_code = 1;
+        }
+
+        return ret_code;
+}
+
+static int tm_consume_sent_pkt(tm_system_t *tm_system,
+			       pkt_desc_t *sent_pkt_desc)
+{
+	odp_int_pkt_queue_t odp_int_pkt_queue;
+	tm_queue_obj_t *tm_queue_obj;
+	odp_packet_t pkt;
+	pkt_desc_t *new_pkt_desc;
 	uint32_t queue_num, pkt_len;
+	int rc;
 
 	queue_num = sent_pkt_desc->queue_num;
 	tm_queue_obj = tm_system->queue_num_tbl[queue_num];
@@ -1265,35 +1578,6 @@ static void tm_pkt_sent_updates(tm_system_t *tm_system,
 	tm_queue_cnts_decrement(tm_system, tm_queue_obj->tm_wred_node,
 				tm_queue_obj->priority, pkt_len);
 
-	shaper_obj = &tm_queue_obj->shaper_obj;
-	update_shaper_for_pkt_sent(tm_system, shaper_obj, sent_pkt_desc);
-
-	tm_node_obj = shaper_obj->next_tm_node;
-	while (tm_node_obj) /*not at egress */ {
-		update_scheduler_for_sent_pkt(tm_node_obj->schedulers_obj);
-
-		shaper_obj = &tm_node_obj->shaper_obj;
-		update_shaper_for_pkt_sent(tm_system, shaper_obj,
-					   sent_pkt_desc);
-
-		tm_node_obj = shaper_obj->next_tm_node;
-	}
-}
-
-static int tm_consume_pkt_desc(tm_system_t *tm_system,
-			       pkt_desc_t *sent_pkt_desc)
-{
-	odp_int_pkt_queue_t odp_int_pkt_queue;
-	tm_queue_obj_t *tm_queue_obj;
-	odp_packet_t pkt;
-	pkt_desc_t *new_pkt_desc;
-	uint32_t queue_num, propagate_flags, flags;
-	int rc;
-
-	queue_num = sent_pkt_desc->queue_num;
-	tm_queue_obj = tm_system->queue_num_tbl[queue_num];
-	tm_pkt_sent_updates(tm_system, sent_pkt_desc);
-
 	/* Get the next pkt in the tm_queue, if there is one. */
 	odp_int_pkt_queue = tm_queue_obj->odp_int_pkt_queue;
 	rc = odp_pkt_queue_remove(tm_system->odp_int_queue_pool,
@@ -1301,21 +1585,19 @@ static int tm_consume_pkt_desc(tm_system_t *tm_system,
 	if (rc < 0)
 		return rc;
 
-	propagate_flags = PF_RM_CURRENT_BEST;
 	new_pkt_desc = NULL;
 	if (0 < rc) {
-		propagate_flags |= PF_NEW_PKT_IN;
 		tm_queue_obj->pkt = pkt;
-		tm_pkt_desc_init(&tm_queue_obj->in_pkt_desc, pkt, queue_num);
+		tm_pkt_desc_init(&tm_queue_obj->in_pkt_desc, pkt, tm_queue_obj);
 		new_pkt_desc = &tm_queue_obj->in_pkt_desc;
 		tm_queue_obj->pkts_dequeued_cnt++;
 	}
 
-	flags = tm_propagate_pkt_desc(tm_system, &tm_queue_obj->shaper_obj,
-				      new_pkt_desc, tm_queue_obj->priority,
-				      sent_pkt_desc,
-				      propagate_flags);
-	return (flags & PF_REACHED_EGRESS) != 0;
+	rc = tm_consume_pkt_desc(tm_system, &tm_queue_obj->shaper_obj,
+                                 new_pkt_desc, tm_queue_obj->priority,
+                                 sent_pkt_desc);
+
+	return rc > 0;
 }
 
 static odp_tm_percent_t tm_queue_fullness(odp_tm_wred_params_t *wred_params,
@@ -1377,7 +1659,7 @@ static odp_bool_t tm_local_random_drop(tm_system_t *tm_system,
 		drop_prob =
 			(numer * (uint32_t)(queue_fullness - min_threshold)) /
 			denom;
-	} else /* med_threshold <= queue_fullness. */ {
+	} else { /* med_threshold <= queue_fullness. */
 		denom = (uint32_t)(10000 - med_threshold);
 		numer = (uint32_t)(max_drop_prob - med_drop_prob);
 		drop_prob = max_drop_prob -
@@ -1586,25 +1868,34 @@ static int tm_enqueue(tm_system_t *tm_system,
 static void tm_send_pkt(tm_system_t *tm_system,
 			uint32_t max_consume_sends ODP_UNUSED)
 {
-	tm_queue_obj_t *tm_queue_obj;
+        tm_queue_obj_t *tm_queue_obj;
+        odp_packet_t odp_pkt;
 	pkt_desc_t *pkt_desc;
-	uint32_t cnt;
-	int rc;
+	uint32_t cnt, queue_num;
 
 	/* for (cnt = 1; cnt < max_consume_sends; cnt++) @todo */
 	for (cnt = 1; cnt < 1000; cnt++) {
-	        pkt_desc = tm_system->egress_pkt_desc;
-		if (!pkt_desc)
-		          return;
+	        pkt_desc = &tm_system->egress_pkt_desc;
+                queue_num = pkt_desc->queue_num;
+		if (queue_num == 0)
+                        return;
 
-		tm_queue_obj = tm_system->queue_num_tbl[pkt_desc->queue_num];
-		tm_system->egress.egress_fcn(tm_queue_obj->pkt);
+                tm_system->egress_pkt_desc = EMPTY_PKT_DESC;
+		tm_queue_obj = tm_system->queue_num_tbl[queue_num];
+                odp_pkt = tm_queue_obj->pkt;
+                if (odp_pkt == INVALID_PKT)
+                        return;
+
+		tm_system->egress.egress_fcn(odp_pkt);
+                tm_queue_obj->sent_pkt = tm_queue_obj->pkt;
+                tm_queue_obj->sent_pkt_desc = tm_queue_obj->in_pkt_desc;
 		tm_queue_obj->pkt = INVALID_PKT;
-		tm_system->egress_pkt_desc = NULL;
-		rc = tm_consume_pkt_desc(tm_system,
-					 &tm_queue_obj->in_pkt_desc);
-		if (rc <= 0)
-		  return;
+                tm_queue_obj->in_pkt_desc = EMPTY_PKT_DESC;
+		tm_consume_sent_pkt(tm_system, &tm_queue_obj->sent_pkt_desc);
+                tm_queue_obj->sent_pkt = INVALID_PKT;
+                tm_queue_obj->sent_pkt_desc = EMPTY_PKT_DESC;
+		if (tm_system->egress_pkt_desc.queue_num == 0)
+                        return;
 	}
 }
 
@@ -1617,7 +1908,7 @@ static int tm_process_input_work_queue(tm_system_t *tm_system,
 	tm_shaper_obj_t *shaper_obj;
 	odp_packet_t pkt;
 	pkt_desc_t *pkt_desc;
-	uint32_t cnt, queue_num, flags;
+	uint32_t cnt;
 	int rc;
 
 	for (cnt = 1; cnt <= pkts_to_process; cnt++) {
@@ -1642,21 +1933,16 @@ static int tm_process_input_work_queue(tm_system_t *tm_system,
 			 * with, then make this one the head pkt.
 			 */
 			tm_queue_obj->pkt = pkt;
-			queue_num = tm_queue_obj->queue_num;
 			tm_pkt_desc_init(&tm_queue_obj->in_pkt_desc, pkt,
-					 queue_num);
-
+					 tm_queue_obj);
 			pkt_desc = &tm_queue_obj->in_pkt_desc;
 			shaper_obj = &tm_queue_obj->shaper_obj;
-			flags = tm_propagate_pkt_desc(tm_system,
-						      shaper_obj,
-						      pkt_desc,
-						      tm_queue_obj->priority,
-						      NULL,
-						      PF_NEW_PKT_IN);
-			if (flags & PF_REACHED_EGRESS)
+			rc = tm_propagate_pkt_desc(tm_system, shaper_obj,
+                                                   pkt_desc,
+                                                   tm_queue_obj->priority);
+			if (0 < rc)
 				return 1;
-			/*Send thru spigot */
+			/* Send thru spigot */
 		}
 	}
 
@@ -1665,38 +1951,50 @@ static int tm_process_input_work_queue(tm_system_t *tm_system,
 
 static int tm_process_expired_timers(tm_system_t *tm_system,
 				     odp_timer_wheel_t odp_int_timer_wheel,
-				     uint64_t current_cycles)
+				     uint64_t current_cycles ODP_UNUSED)
 {
 	tm_shaper_obj_t *shaper_obj;
+        tm_queue_obj_t *tm_queue_obj;
 	pkt_desc_t *pkt_desc;
-	uint32_t cnt, propagate_flags, flags;
+        uint64_t timer_context;
+	uint32_t work_done, cnt, queue_num, timer_seq;
 	uint8_t priority;
+        void *ptr;
 
+        work_done = 0;
 	for (cnt = 1; cnt <= 4; cnt++) {
-		shaper_obj =
-			odp_timer_wheel_next_expired(odp_int_timer_wheel);
-		if (!shaper_obj)
-			return 0;
+		ptr = odp_timer_wheel_next_expired(odp_int_timer_wheel);
+		if (!ptr)
+			return work_done;
 
-		shaper_obj->timer_outstanding = 0;
-		if ((shaper_obj->callback_reason != NO_CALLBACK) &&
-		    (shaper_obj->callback_time <= current_cycles)) {
-			pkt_desc = shaper_obj->in_pkt_desc;
-			priority = shaper_obj->input_priority;
-			if (shaper_obj->callback_reason == BOOST_PRIORITY)
-				propagate_flags = PF_PRIORITY_BOOST;
-			else
-				propagate_flags = PF_NEW_PKT_IN;
+                timer_context = (uint64_t) ptr;
+                queue_num = (timer_context & 0xFFFFFFFF) >> 4;
+                timer_seq = timer_context >> 32;
+                tm_queue_obj = tm_system->queue_num_tbl[queue_num];
 
-			flags = tm_propagate_pkt_desc(tm_system, shaper_obj,
-						      pkt_desc, priority, NULL,
-						      propagate_flags);
-			if (flags & PF_REACHED_EGRESS)
-				tm_send_pkt(tm_system, 4);
-		}
+                if ((tm_queue_obj == NULL) ||
+                    (tm_queue_obj->timer_reason == NO_CALLBACK) ||
+                    (tm_queue_obj->timer_shaper == NULL) ||
+                    (tm_queue_obj->timer_seq != timer_seq)) {
+                        if (tm_queue_obj->timer_cancels_outstanding != 0)
+                                tm_queue_obj->timer_cancels_outstanding--;
+                        return work_done;
+                }
+
+                shaper_obj = tm_queue_obj->timer_shaper;
+                pkt_desc = &shaper_obj->in_pkt_desc;
+                priority = shaper_obj->input_priority;
+
+                delete_timer(tm_system, tm_queue_obj, 0);
+
+                tm_propagate_pkt_desc(tm_system, shaper_obj,
+                                      pkt_desc, priority);
+                work_done++;
+                if (tm_system->egress_pkt_desc.queue_num != 0)
+                        tm_send_pkt(tm_system, 4);
 	}
 
-	return 0;
+	return work_done;
 }
 
 static void *tm_system_thread(void *arg)
@@ -1705,8 +2003,7 @@ static void *tm_system_thread(void *arg)
 	input_work_queue_t *input_work_queue;
 	tm_system_t *tm_system;
 	uint64_t current_cycles;
-	uint32_t work_queue_cnt;
-	uint8_t destroying;
+	uint32_t destroying, work_queue_cnt, timer_cnt;
 	int rc;
 
 	odp_init_local(ODP_THREAD_WORKER);
@@ -1718,38 +2015,52 @@ static void *tm_system_thread(void *arg)
 	odp_barrier_wait(&tm_system->tm_system_barrier);
 
 	current_cycles = 100;
+        destroying = odp_atomic_load_u32(&tm_system->destroying);
 	while (destroying == 0) {
-		tm_system->current_cycles = current_cycles;
-		rc = odp_timer_wheel_curr_time_update(odp_int_timer_wheel,
-						      current_cycles);
-		if (0 < rc) {
-			/* Process a batch of expired timers - each of which
-			 * could cause a pkt to egress the tm system.
-			 */
-			rc = tm_process_expired_timers(tm_system,
-						       odp_int_timer_wheel,
-						       current_cycles);
-			current_cycles += 16;
-		}
+                tm_system->current_cycles = current_cycles;
+                rc = odp_timer_wheel_curr_time_update(odp_int_timer_wheel,
+                                                      current_cycles);
+                if (0 < rc) {
+                        /* Process a batch of expired timers - each of which
+                         * could cause a pkt to egress the tm system.
+                         */
+                        timer_cnt = 1;
+                        rc = tm_process_expired_timers(tm_system,
+                                                       odp_int_timer_wheel,
+                                                       current_cycles);
+                        current_cycles += 16;
+                }
+                else
+                        timer_cnt = odp_timer_wheel_count(odp_int_timer_wheel);
 
-		work_queue_cnt = odp_atomic_load_u32(
-			&input_work_queue->queue_cnt);
-		if (work_queue_cnt != 0) {
-			rc = tm_process_input_work_queue(tm_system,
-							 input_work_queue, 1);
-			current_cycles += 8;
-			if (0 < rc) {
-				tm_send_pkt(tm_system, 4);
-				current_cycles += 8;
-			}
-		}
+                work_queue_cnt =
+                    odp_atomic_load_u32(&input_work_queue->queue_cnt);
+                if (work_queue_cnt != 0) {
+                        rc = tm_process_input_work_queue(tm_system,
+                                                         input_work_queue, 1);
+                        current_cycles += 8;
+                        if (tm_system->egress_pkt_desc.queue_num != 0) {
+                                tm_send_pkt(tm_system, 4);
+                                current_cycles += 8;
+                        }
+                }
 
-		current_cycles += 2;
-		destroying = odp_atomic_load_u32(&tm_system->destroying);
+                current_cycles += 16;
+                tm_system->is_idle = (timer_cnt == 0) &&
+                                     (work_queue_cnt == 0);
+                destroying = odp_atomic_load_u32(&tm_system->destroying);
 	}
 
 	odp_barrier_wait(&tm_system->tm_system_destroy_barrier);
 	return NULL;
+}
+
+odp_bool_t odp_tm_is_idle(odp_tm_t odp_tm)
+{
+	tm_system_t *tm_system;
+
+	tm_system = GET_TM_SYSTEM(odp_tm);
+        return tm_system->is_idle;
 }
 
 void odp_tm_capability_init(odp_tm_capability_t *capability)
@@ -2170,7 +2481,7 @@ odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, const char *name,
 	tm_system_t *tm_system;
 	uint32_t num_priorities, priority, schedulers_obj_len, color;
 
-	/*Allocatea tm_node_obj_t record. */
+	/* Allocate a tm_node_obj_t record. */
 	tm_system = GET_TM_SYSTEM(odp_tm);
 	tm_node_obj = malloc(sizeof(tm_node_obj_t));
 	if (!tm_node_obj)
@@ -2243,6 +2554,11 @@ odp_tm_node_t odp_tm_node_create(odp_tm_t odp_tm, const char *name,
 				tm_get_profile_params(wred_profile,
 						      TM_WRED_PROFILE);
 	}
+
+        tm_node_obj->magic_num = TM_NODE_MAGIC_NUM;
+        tm_node_obj->shaper_obj.enclosing_entity = tm_node_obj;
+        tm_node_obj->shaper_obj.in_tm_node_obj = 1;
+        tm_node_obj->schedulers_obj->enclosing_entity = tm_node_obj;
 
 	odp_ticketlock_unlock(&tm_system->tm_system_lock);
 	return odp_tm_node;
@@ -2360,7 +2676,7 @@ odp_tm_queue_t odp_tm_queue_create(odp_tm_t odp_tm,
 	tm_system_t *tm_system;
 	uint32_t color;
 
-	/*Allocate a tm_queue_obj_t record. */
+	/* Allocate a tm_queue_obj_t record. */
 	tm_system = GET_TM_SYSTEM(odp_tm);
 	tm_queue_obj = malloc(sizeof(tm_queue_obj_t));
 	if (!tm_queue_obj)
@@ -2409,6 +2725,10 @@ odp_tm_queue_t odp_tm_queue_create(odp_tm_t odp_tm,
 				tm_get_profile_params(wred_profile,
 						      TM_WRED_PROFILE);
 	}
+
+        tm_queue_obj->magic_num = TM_QUEUE_MAGIC_NUM;
+        tm_queue_obj->shaper_obj.enclosing_entity = tm_queue_obj;
+        tm_queue_obj->shaper_obj.in_tm_node_obj = 0;
 
 	odp_ticketlock_unlock(&tm_system->tm_system_lock);
 	return odp_tm_queue;
@@ -2507,25 +2827,6 @@ int odp_tm_queue_wred_config(odp_tm_queue_t tm_queue,
 	return rc;
 }
 
-/* Recurse up the tree towards the egress, setting connected_to_egress along
- * the way.
- */
-static odp_bool_t odp_tm_tree_traverse(tm_node_obj_t *tm_node_obj)
-{
-	tm_shaper_obj_t *shaper_obj;
-	tm_node_obj_t *next_tm_node_obj;
-	odp_bool_t connected_to_egress;
-
-	shaper_obj = &tm_node_obj->shaper_obj;
-	next_tm_node_obj = shaper_obj->next_tm_node;
-	if (!next_tm_node_obj)
-		return tm_node_obj->connected_to_egress;
-
-	connected_to_egress = odp_tm_tree_traverse(next_tm_node_obj);
-	tm_node_obj->connected_to_egress = connected_to_egress;
-	return connected_to_egress;
-}
-
 int odp_tm_node_connect(odp_tm_node_t src_tm_node, odp_tm_node_t dst_tm_node)
 {
 	tm_wred_node_t *src_tm_wred_node, *dst_tm_wred_node;
@@ -2536,16 +2837,10 @@ int odp_tm_node_connect(odp_tm_node_t src_tm_node, odp_tm_node_t dst_tm_node)
 	if (!src_tm_node_obj)
 		return -1;
 
-	if (!dst_tm_node_obj) {
-		/*This src_tm_node_obj connects directly to the egress spigot.*/
-		src_tm_node_obj->connected_to_egress = 1;
-	} else {
-		odp_tm_tree_traverse(dst_tm_node_obj);
+	if (dst_tm_node_obj) {
 		src_tm_wred_node = src_tm_node_obj->tm_wred_node;
 		dst_tm_wred_node = dst_tm_node_obj->tm_wred_node;
 		src_tm_wred_node->next_tm_wred_node = dst_tm_wred_node;
-		if (dst_tm_node_obj->connected_to_egress)
-			src_tm_node_obj->connected_to_egress = 1;
 	}
 
 	src_tm_node_obj->shaper_obj.next_tm_node = dst_tm_node_obj;
@@ -2562,10 +2857,6 @@ int odp_tm_queue_connect(odp_tm_queue_t tm_queue, odp_tm_node_t dst_tm_node)
 	dst_tm_node_obj = GET_TM_NODE_OBJ(dst_tm_node);
 	if ((!src_tm_queue_obj) || (!dst_tm_node_obj))
 		return -1;
-
-	odp_tm_tree_traverse(dst_tm_node_obj);
-	if (dst_tm_node_obj->connected_to_egress)
-		src_tm_queue_obj->connected_to_egress = 1;
 
 	src_tm_wred_node = src_tm_queue_obj->tm_wred_node;
 	dst_tm_wred_node = dst_tm_node_obj->tm_wred_node;
@@ -2739,7 +3030,7 @@ void odp_tm_stats_print(odp_tm_t odp_tm)
 	input_work_queue_t *input_work_queue;
 	tm_queue_obj_t *tm_queue_obj;
 	tm_system_t *tm_system;
-	uint32_t queue_num;
+	uint32_t queue_num, max_queue_num;
 
 	tm_system = GET_TM_SYSTEM(odp_tm);
 	input_work_queue = tm_system->input_work_queue;
@@ -2762,8 +3053,8 @@ void odp_tm_stats_print(odp_tm_t odp_tm)
 	odp_timer_wheel_stats_print(tm_system->odp_int_timer_wheel);
 	odp_sorted_list_stats_print(tm_system->odp_int_sorted_pool);
 
-	for (queue_num = 1; queue_num < tm_system->next_queue_num;
-	     queue_num++) {
+        max_queue_num = tm_system->next_queue_num;
+	for (queue_num = 1; queue_num < max_queue_num; queue_num++) {
 		tm_queue_obj = tm_system->queue_num_tbl[queue_num];
 		ODP_DBG("queue_num=%u priority=%u rcvd=%u enqueued=%u "
 			"dequeued=%u consumed=%u\n",

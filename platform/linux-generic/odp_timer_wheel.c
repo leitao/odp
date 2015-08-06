@@ -528,43 +528,45 @@ static int expired_timers_remove(timer_wheels_t *timer_wheels,
 {
 	current_timer_slot_t *head_entry;
 	expired_ring_t       *expired_ring;
-	uint32_t              head_idx;
+	uint32_t              count, head_idx;
 	int                   rc;
 
 	expired_ring = timer_wheels->expired_timers_ring;
-	if (expired_ring->count == 0)
-		return 0;
+        for (count = 1; count <= 2; count++) {
+                if (expired_ring->count == 0)
+                        return 0;
 
-	head_idx   = expired_ring->head_idx;
-	head_entry = &expired_ring->entries[head_idx];
-	if ((head_entry->user_data & 0x3) == 1) {
-		*user_data_ptr = head_entry->user_data;
-		expired_ring->entries[head_idx].user_data = 0;
-		head_idx++;
-		if (expired_ring->max_idx < head_idx)
-			head_idx = 0;
+                head_idx   = expired_ring->head_idx;
+                head_entry = &expired_ring->entries[head_idx];
+                if ((head_entry->user_data & 0x3) == 1) {
+                        *user_data_ptr = head_entry->user_data;
+                        expired_ring->entries[head_idx].user_data = 0;
+                        head_idx++;
+                        if (expired_ring->max_idx < head_idx)
+                                head_idx = 0;
 
-		expired_ring->head_idx = head_idx;
-		expired_ring->count--;
-		return 1;
-	}
+                        expired_ring->head_idx = head_idx;
+                        expired_ring->count--;
+                        return 1;
+                }
 
-	/* Search timer_blk_list for non-empty user_data values. */
-	rc = timer_blk_list_search(timer_wheels, head_entry, user_data_ptr);
-	if (0 < rc)
-		return rc;
+                /* Search timer_blk_list for non-empty user_data values. */
+                rc = timer_blk_list_search(timer_wheels, head_entry,
+                                           user_data_ptr);
+                if (0 < rc)
+                        return 1;
 
-	/* Advance to use the next ring entry. */
-	expired_ring->entries[head_idx].user_data = 0;
-	head_idx++;
-	if (expired_ring->max_idx < head_idx)
-		head_idx = 0;
+                /* Advance to use the next ring entry. */
+                expired_ring->entries[head_idx].user_data = 0;
+                head_idx++;
+                if (expired_ring->max_idx < head_idx)
+                        head_idx = 0;
 
-	expired_ring->head_idx = head_idx;
-	expired_ring->count--;
+                expired_ring->head_idx = head_idx;
+                expired_ring->count--;
+        }
 
-	head_entry = &expired_ring->entries[head_idx];
-	return timer_blk_list_search(timer_wheels, head_entry, user_data_ptr);
+        return 0;
 }
 
 static int timer_current_wheel_update(timer_wheels_t *timer_wheels,
@@ -835,6 +837,15 @@ void *odp_timer_wheel_next_expired(odp_timer_wheel_t timer_wheel)
 	user_data &= ~0x3;
 	timer_wheels->total_timer_removes++;
 	return (void *)user_data;
+}
+
+uint32_t odp_timer_wheel_count(odp_timer_wheel_t timer_wheel)
+{
+        timer_wheels_t *timer_wheels;
+
+	timer_wheels = (timer_wheels_t *) timer_wheel;
+        return timer_wheels->total_timer_inserts -
+               timer_wheels->total_timer_removes;
 }
 
 static void odp_int_timer_wheel_desc_print(wheel_desc_t *wheel_desc,

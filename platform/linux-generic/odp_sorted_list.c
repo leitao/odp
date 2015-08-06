@@ -34,6 +34,7 @@ typedef struct {
 
 typedef struct {
 	uint64_t             total_inserts;
+        uint64_t             total_deletes;
 	uint64_t             total_removes;
 	uint32_t             max_sorted_lists;
 	uint32_t             next_list_idx;
@@ -72,7 +73,7 @@ odp_int_sorted_list_t odp_sorted_list_create(odp_int_sorted_pool_t sorted_pool,
 int odp_sorted_list_insert(odp_int_sorted_pool_t sorted_pool,
 			   odp_int_sorted_list_t sorted_list,
 			   uint64_t              sort_key,
-			   void                 *user_ptr)
+			   uint64_t              user_data)
 {
 	sorted_list_desc_t *list_desc;
 	sorted_list_item_t *new_list_item, *list_item, *prev_list_item;
@@ -90,7 +91,7 @@ int odp_sorted_list_insert(odp_int_sorted_pool_t sorted_pool,
 	memset(new_list_item, 0, sizeof(sorted_list_item_t));
 	new_list_item->next_item = NULL;
 	new_list_item->sort_key  = sort_key;
-	new_list_item->user_data = (uint64_t)user_ptr;
+	new_list_item->user_data = user_data;
 
 	/* Now insert the new_list_item according to the sort_key (lowest
 	 * value first).
@@ -113,26 +114,108 @@ int odp_sorted_list_insert(odp_int_sorted_pool_t sorted_pool,
 	return 0;
 }
 
-void *odp_sorted_list_remove(odp_int_sorted_pool_t sorted_pool,
-			     odp_int_sorted_list_t sorted_list,
-			     uint64_t             *sort_key_ptr)
+int odp_sorted_list_find(odp_int_sorted_pool_t sorted_pool,
+                         odp_int_sorted_list_t sorted_list,
+                         uint64_t              user_data,
+                         uint64_t             *sort_key_ptr)
 {
 	sorted_list_desc_t *list_desc;
 	sorted_list_item_t *list_item;
 	sorted_pool_t      *pool;
-	uint64_t            user_data;
+	uint32_t            list_idx;
+
+	pool     = (sorted_pool_t *) sorted_pool;
+	list_idx = (uint32_t) sorted_list;
+	if ((pool->next_list_idx    <= list_idx) ||
+	    (pool->max_sorted_lists <= list_idx))
+		return -1;
+
+	list_desc = &pool->list_descs->descs[list_idx];
+
+	/* Now search the sorted linked list - as described by list_desc -
+         * until an entry is found whose user_data field matches the supplied
+         * user_data or the end of the list is reached.
+	 */
+	list_item = list_desc->first_item;
+	while (list_item) {
+                if (list_item->user_data == user_data) {
+                        if (sort_key_ptr != NULL)
+                                *sort_key_ptr = list_item->sort_key;
+
+                        return 1;
+                }
+
+                list_item = list_item->next_item;
+        }
+
+        return 0;
+}
+
+int odp_sorted_list_delete(odp_int_sorted_pool_t sorted_pool,
+			   odp_int_sorted_list_t sorted_list,
+			   uint64_t              user_data)
+{
+	sorted_list_desc_t *list_desc;
+	sorted_list_item_t *next_list_item, *list_item, *prev_list_item;
+	sorted_pool_t      *pool;
+	uint32_t            list_idx;
+
+	pool     = (sorted_pool_t *) sorted_pool;
+	list_idx = (uint32_t)sorted_list;
+	if ((pool->next_list_idx    <= list_idx) ||
+	    (pool->max_sorted_lists <= list_idx))
+		return -1;
+
+	list_desc = &pool->list_descs->descs[list_idx];
+
+	/* Now search the sorted linked list - as described by list_desc -
+         * until an entry is found whose user_data field matches the supplied
+         * user_data or the end of the list is reached.
+	 */
+	list_item      = list_desc->first_item;
+	prev_list_item = NULL;
+	while (list_item) {
+                next_list_item = list_item->next_item;
+
+                if (list_item->user_data == user_data) {
+                      if (!prev_list_item)
+                              list_desc->first_item = next_list_item;
+                      else
+                              prev_list_item->next_item = next_list_item;
+
+                      list_desc->sorted_list_len--;
+                      free(list_item);
+                      pool->total_deletes++;
+                      return 0;
+                }
+
+		prev_list_item = list_item;
+		list_item      = next_list_item;
+	}
+
+        return -1;
+}
+
+int odp_sorted_list_remove(odp_int_sorted_pool_t sorted_pool,
+                           odp_int_sorted_list_t sorted_list,
+                           uint64_t             *sort_key_ptr,
+                           uint64_t             *user_data_ptr)
+{
+	sorted_list_desc_t *list_desc;
+	sorted_list_item_t *list_item;
+	sorted_pool_t      *pool;
 	uint32_t            list_idx;
 
 	pool     = (sorted_pool_t *)sorted_pool;
 	list_idx = (uint32_t)sorted_list;
 	if ((pool->next_list_idx    <= list_idx) ||
 	    (pool->max_sorted_lists <= list_idx))
-		return NULL;
+		return -1;
 
 	list_desc = &pool->list_descs->descs[list_idx];
 	if ((list_desc->sorted_list_len == 0) ||
 	    (!list_desc->first_item))
-		return NULL;
+		return -1;
 
 	list_item             = list_desc->first_item;
 	list_desc->first_item = list_item->next_item;
@@ -141,10 +224,12 @@ void *odp_sorted_list_remove(odp_int_sorted_pool_t sorted_pool,
 	if (sort_key_ptr)
 		*sort_key_ptr = list_item->sort_key;
 
-	user_data = list_item->user_data;
+	if (user_data_ptr)
+		*user_data_ptr = list_item->user_data;
+
 	free(list_item);
 	pool->total_removes++;
-	return (void *)user_data;
+	return 1;
 }
 
 void odp_sorted_list_stats_print(odp_int_sorted_pool_t sorted_pool)
@@ -155,8 +240,8 @@ void odp_sorted_list_stats_print(odp_int_sorted_pool_t sorted_pool)
 	ODP_DBG("sorted_pool=0x%lX\n", sorted_pool);
 	ODP_DBG("  max_sorted_lists=%u next_list_idx=%u\n",
 	        pool->max_sorted_lists, pool->next_list_idx);
-	ODP_DBG("  total_inserts=%lu total_removes=%lu\n",
-	        pool->total_inserts, pool->total_removes);
+	ODP_DBG("  total_inserts=%lu total_deletes=%lu total_removes=%lu\n",
+	        pool->total_inserts, pool->total_deletes, pool->total_removes);
 }
 
 void odp_sorted_pool_destroy(odp_int_sorted_pool_t sorted_pool)

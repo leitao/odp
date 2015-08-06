@@ -29,7 +29,6 @@ odp_timer_wheel_t odp_timer_wheel_create(uint32_t max_concurrent_timers,
 /* odp_int_timer_wheel_curr_time_update should be called before the first
  * call to odp_int_timer_wheel_insert, odp_int_timer_wheel_next, etc..
  * It returns > 0 if there are timers expired.
- *
  */
 uint32_t odp_timer_wheel_curr_time_update(odp_timer_wheel_t timer_wheel,
 					  uint64_t          current_time);
@@ -50,6 +49,14 @@ int odp_timer_wheel_insert(odp_timer_wheel_t timer_wheel,
  * odp_int_timer_wheel_insert().
  */
 void *odp_timer_wheel_next_expired(odp_timer_wheel_t timer_wheel);
+
+/* Returns the number of timers that have been inserted but not yet passed
+ * back to the user.  This number includes the number of timers that have
+ * internally expired and are in the expired list, but have not yet been
+ * retrieved via an odp_timer_wheel_next_expired call.
+ */
+uint32_t odp_timer_wheel_count(odp_timer_wheel_t timer_wheel);
+
 
 void odp_timer_wheel_stats_print(odp_timer_wheel_t timer_wheel);
 

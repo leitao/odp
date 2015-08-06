@@ -1575,6 +1575,8 @@ int odp_tm_total_threshold_config(odp_tm_t odp_tm,
 void odp_tm_periodic_update(void);
 
 
+odp_bool_t odp_tm_is_idle(odp_tm_t odp_tm);
+
 void odp_tm_stats_print(odp_tm_t odp_tm);
 
 /**
