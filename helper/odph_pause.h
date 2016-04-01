@@ -44,6 +44,9 @@ static inline void odph_pause(void)
 	__asm__ __volatile__ ("nop");
 	__asm__ __volatile__ ("nop");
 
+#elif defined __powerpc__
+	__asm__ __volatile__ ("ori 27, 27, 27");
+
 #endif
 }
 
